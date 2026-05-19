@@ -2501,6 +2501,19 @@ func TestSetBootOnce(t *testing.T) {
 				if annotations["redfish.boot.source.override.target"] != "Cd" {
 					t.Error("Expected redfish override target annotation to be 'Cd'")
 				}
+
+				// Original rebootPolicy annotation should be empty (VM had no policy set)
+				if annotations[BootOnceOriginalRebootPolicyAnnotation] != "" {
+					t.Errorf("Expected original reboot policy annotation to be empty, got '%s'", annotations[BootOnceOriginalRebootPolicyAnnotation])
+				}
+
+				// rebootPolicy should be set to Terminate
+				if vm.Spec.Template == nil || vm.Spec.Template.Spec.Domain.RebootPolicy == nil {
+					t.Fatal("Expected rebootPolicy to be set")
+				}
+				if *vm.Spec.Template.Spec.Domain.RebootPolicy != kubevirtv1.RebootPolicyTerminate {
+					t.Errorf("Expected rebootPolicy to be 'Terminate', got '%s'", *vm.Spec.Template.Spec.Domain.RebootPolicy)
+				}
 			},
 		},
 		{
@@ -2554,6 +2567,79 @@ func TestSetBootOnce(t *testing.T) {
 				if labels[BootOnceLabel] != "enabled" {
 					t.Errorf("Expected boot-once label to be 'enabled', got '%s'", labels[BootOnceLabel])
 				}
+
+				// rebootPolicy should be set to Terminate even when VM is off
+				if vm.Spec.Template == nil || vm.Spec.Template.Spec.Domain.RebootPolicy == nil {
+					t.Fatal("Expected rebootPolicy to be set")
+				}
+				if *vm.Spec.Template.Spec.Domain.RebootPolicy != kubevirtv1.RebootPolicyTerminate {
+					t.Errorf("Expected rebootPolicy to be 'Terminate', got '%s'", *vm.Spec.Template.Spec.Domain.RebootPolicy)
+				}
+			},
+		},
+		{
+			name:       "Set boot once preserves existing rebootPolicy in annotation",
+			bootTarget: "Cd",
+			setupVM: func(mockClient *MockDynamicClient) {
+				bootOrder1 := uint(1)
+				reboot := kubevirtv1.RebootPolicyReboot
+				vm := &kubevirtv1.VirtualMachine{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vm",
+						Namespace: "test-namespace",
+					},
+					Spec: kubevirtv1.VirtualMachineSpec{
+						Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
+							Spec: kubevirtv1.VirtualMachineInstanceSpec{
+								Domain: kubevirtv1.DomainSpec{
+									RebootPolicy: &reboot,
+									Devices: kubevirtv1.Devices{
+										Disks: []kubevirtv1.Disk{
+											{Name: "disk0", BootOrder: &bootOrder1},
+											{Name: "cdrom0", DiskDevice: kubevirtv1.DiskDevice{CDRom: &kubevirtv1.CDRomTarget{}}},
+										},
+									},
+								},
+								Volumes: []kubevirtv1.Volume{
+									{Name: "disk0", VolumeSource: kubevirtv1.VolumeSource{DataVolume: &kubevirtv1.DataVolumeSource{Name: "dv0"}}},
+									{Name: "cdrom0", VolumeSource: kubevirtv1.VolumeSource{DataVolume: &kubevirtv1.DataVolumeSource{Name: "cdrom-dv"}}},
+								},
+							},
+						},
+					},
+				}
+				mockClient.AddVM(vm)
+			},
+			setupVMI: func(mockClient *MockDynamicClient) {
+				vmi := &kubevirtv1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vm",
+						Namespace: "test-namespace",
+						UID:       "vmi-uid-1",
+					},
+					Status: kubevirtv1.VirtualMachineInstanceStatus{
+						Phase: kubevirtv1.Running,
+					},
+				}
+				mockClient.AddVMI(vmi)
+			},
+			validate: func(t *testing.T, mockClient *MockDynamicClient) {
+				vm, err := mockClient.GetVM("test-namespace", "test-vm")
+				if err != nil {
+					t.Fatalf("Failed to get VM: %v", err)
+				}
+
+				annotations := vm.GetAnnotations()
+				if annotations[BootOnceOriginalRebootPolicyAnnotation] != "Reboot" {
+					t.Errorf("Expected original reboot policy to be 'Reboot', got '%s'", annotations[BootOnceOriginalRebootPolicyAnnotation])
+				}
+
+				if vm.Spec.Template == nil || vm.Spec.Template.Spec.Domain.RebootPolicy == nil {
+					t.Fatal("Expected rebootPolicy to be set")
+				}
+				if *vm.Spec.Template.Spec.Domain.RebootPolicy != kubevirtv1.RebootPolicyTerminate {
+					t.Errorf("Expected rebootPolicy to be 'Terminate', got '%s'", *vm.Spec.Template.Spec.Domain.RebootPolicy)
+				}
 			},
 		},
 	}
@@ -2580,15 +2666,18 @@ func TestSetBootOnce(t *testing.T) {
 
 // TestHandleVMUpdate tests the handleVMUpdate function
 func TestHandleVMUpdate(t *testing.T) {
+	terminate := kubevirtv1.RebootPolicyTerminate
+
 	testCases := []struct {
-		name             string
-		setupVM          func(mockClient *MockDynamicClient)
-		setupVMI         func(mockClient *MockDynamicClient)
-		expectRestore    bool
-		expectClearState bool
+		name                 string
+		setupVM              func(mockClient *MockDynamicClient)
+		setupVMI             func(mockClient *MockDynamicClient)
+		expectRestore        bool
+		expectClearState     bool
+		expectedRebootPolicy *kubevirtv1.RebootPolicy
 	}{
 		{
-			name: "VMI UID changed - should restore boot order",
+			name: "VMI UID changed - should restore boot order and rebootPolicy",
 			setupVM: func(mockClient *MockDynamicClient) {
 				bootOrder1 := uint(1)
 				vm := &kubevirtv1.VirtualMachine{
@@ -2601,6 +2690,7 @@ func TestHandleVMUpdate(t *testing.T) {
 						Annotations: map[string]string{
 							BootOnceOriginalConfigAnnotation:       `[{"diskName":"disk0","bootOrder":1},{"diskName":"cdrom0","bootOrder":2}]`,
 							BootOnceVMIUIDAnnotation:               "old-vmi-uid",
+							BootOnceOriginalRebootPolicyAnnotation: "Reboot",
 							"redfish.boot.source.override.enabled": "Once",
 							"redfish.boot.source.override.target":  "Cd",
 						},
@@ -2609,6 +2699,7 @@ func TestHandleVMUpdate(t *testing.T) {
 						Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
 							Spec: kubevirtv1.VirtualMachineInstanceSpec{
 								Domain: kubevirtv1.DomainSpec{
+									RebootPolicy: &terminate,
 									Devices: kubevirtv1.Devices{
 										Disks: []kubevirtv1.Disk{
 											{Name: "disk0", BootOrder: &bootOrder1},
@@ -2637,6 +2728,63 @@ func TestHandleVMUpdate(t *testing.T) {
 			},
 			expectRestore:    true,
 			expectClearState: true,
+			expectedRebootPolicy: func() *kubevirtv1.RebootPolicy {
+				p := kubevirtv1.RebootPolicyReboot
+				return &p
+			}(),
+		},
+		{
+			name: "VMI UID changed, no original rebootPolicy - should remove rebootPolicy",
+			setupVM: func(mockClient *MockDynamicClient) {
+				bootOrder1 := uint(1)
+				vm := &kubevirtv1.VirtualMachine{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vm",
+						Namespace: "test-namespace",
+						Labels: map[string]string{
+							BootOnceLabel: "enabled",
+						},
+						Annotations: map[string]string{
+							BootOnceOriginalConfigAnnotation:       `[{"diskName":"disk0","bootOrder":1}]`,
+							BootOnceVMIUIDAnnotation:               "old-vmi-uid",
+							BootOnceOriginalRebootPolicyAnnotation: "",
+							"redfish.boot.source.override.enabled": "Once",
+							"redfish.boot.source.override.target":  "Cd",
+						},
+					},
+					Spec: kubevirtv1.VirtualMachineSpec{
+						Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
+							Spec: kubevirtv1.VirtualMachineInstanceSpec{
+								Domain: kubevirtv1.DomainSpec{
+									RebootPolicy: &terminate,
+									Devices: kubevirtv1.Devices{
+										Disks: []kubevirtv1.Disk{
+											{Name: "disk0", BootOrder: &bootOrder1},
+										},
+									},
+								},
+							},
+						},
+					},
+				}
+				mockClient.AddVM(vm)
+			},
+			setupVMI: func(mockClient *MockDynamicClient) {
+				vmi := &kubevirtv1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vm",
+						Namespace: "test-namespace",
+						UID:       "new-vmi-uid",
+					},
+					Status: kubevirtv1.VirtualMachineInstanceStatus{
+						Phase: kubevirtv1.Running,
+					},
+				}
+				mockClient.AddVMI(vmi)
+			},
+			expectRestore:        true,
+			expectClearState:     true,
+			expectedRebootPolicy: nil,
 		},
 		{
 			name: "VMI UID same - should not restore",
@@ -2651,6 +2799,7 @@ func TestHandleVMUpdate(t *testing.T) {
 						Annotations: map[string]string{
 							BootOnceOriginalConfigAnnotation:       `[{"diskName":"disk0","bootOrder":1}]`,
 							BootOnceVMIUIDAnnotation:               "same-vmi-uid",
+							BootOnceOriginalRebootPolicyAnnotation: "Reboot",
 							"redfish.boot.source.override.enabled": "Once",
 						},
 					},
@@ -2658,6 +2807,7 @@ func TestHandleVMUpdate(t *testing.T) {
 						Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
 							Spec: kubevirtv1.VirtualMachineInstanceSpec{
 								Domain: kubevirtv1.DomainSpec{
+									RebootPolicy: &terminate,
 									Devices: kubevirtv1.Devices{
 										Disks: []kubevirtv1.Disk{
 											{Name: "disk0"},
@@ -2683,8 +2833,9 @@ func TestHandleVMUpdate(t *testing.T) {
 				}
 				mockClient.AddVMI(vmi)
 			},
-			expectRestore:    false,
-			expectClearState: false,
+			expectRestore:        false,
+			expectClearState:     false,
+			expectedRebootPolicy: &terminate,
 		},
 		{
 			name: "VM was off, now has VMI - should restore",
@@ -2699,6 +2850,7 @@ func TestHandleVMUpdate(t *testing.T) {
 						Annotations: map[string]string{
 							BootOnceOriginalConfigAnnotation:       `[{"diskName":"disk0","bootOrder":1}]`,
 							BootOnceVMIUIDAnnotation:               "", // Was off
+							BootOnceOriginalRebootPolicyAnnotation: "Reboot",
 							"redfish.boot.source.override.enabled": "Once",
 						},
 					},
@@ -2706,6 +2858,7 @@ func TestHandleVMUpdate(t *testing.T) {
 						Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
 							Spec: kubevirtv1.VirtualMachineInstanceSpec{
 								Domain: kubevirtv1.DomainSpec{
+									RebootPolicy: &terminate,
 									Devices: kubevirtv1.Devices{
 										Disks: []kubevirtv1.Disk{
 											{Name: "disk0"},
@@ -2733,6 +2886,10 @@ func TestHandleVMUpdate(t *testing.T) {
 			},
 			expectRestore:    true,
 			expectClearState: true,
+			expectedRebootPolicy: func() *kubevirtv1.RebootPolicy {
+				p := kubevirtv1.RebootPolicyReboot
+				return &p
+			}(),
 		},
 	}
 
@@ -2773,10 +2930,29 @@ func TestHandleVMUpdate(t *testing.T) {
 				if annotations[BootOnceOriginalConfigAnnotation] != "" {
 					t.Errorf("Expected original config annotation to be removed")
 				}
+				if annotations[BootOnceOriginalRebootPolicyAnnotation] != "" {
+					t.Errorf("Expected original reboot policy annotation to be removed, got '%s'", annotations[BootOnceOriginalRebootPolicyAnnotation])
+				}
 			} else {
 				// Boot-once label should still be present
 				if labels[BootOnceLabel] != "enabled" {
 					t.Errorf("Expected boot-once label to be 'enabled', got '%s'", labels[BootOnceLabel])
+				}
+			}
+
+			var actualPolicy *kubevirtv1.RebootPolicy
+			if updatedVM.Spec.Template != nil {
+				actualPolicy = updatedVM.Spec.Template.Spec.Domain.RebootPolicy
+			}
+			if tc.expectedRebootPolicy == nil {
+				if actualPolicy != nil {
+					t.Errorf("Expected rebootPolicy to be nil, got '%s'", *actualPolicy)
+				}
+			} else {
+				if actualPolicy == nil {
+					t.Errorf("Expected rebootPolicy '%s', got nil", *tc.expectedRebootPolicy)
+				} else if *actualPolicy != *tc.expectedRebootPolicy {
+					t.Errorf("Expected rebootPolicy '%s', got '%s'", *tc.expectedRebootPolicy, *actualPolicy)
 				}
 			}
 		})

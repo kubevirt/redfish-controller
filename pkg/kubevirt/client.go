@@ -2328,8 +2328,9 @@ func (*Client) modifyVmBootOrder(vmCopy *kubevirtv1.VirtualMachine, bootTarget s
 	return nil
 }
 
-// SetBootOnce sets the boot source override to "Once" for the next boot
-// It saves the original boot configuration and VMI UID so it can be restored after reboot
+// SetBootOnce sets the boot source override to "Once" for the next boot.
+// It saves the original boot configuration, rebootPolicy and VMI UID so
+// they can be restored after reboot.
 func (c *Client) SetBootOnce(namespace, name, bootTarget string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
@@ -2384,15 +2385,20 @@ func (c *Client) SetBootOnce(namespace, name, bootTarget string) error {
 			}
 			annotations[BootOnceOriginalConfigAnnotation] = originalConfig
 			annotations[BootOnceVMIUIDAnnotation] = currentVMIUID
+			// Keep existing BootOnceOriginalRebootPolicyAnnotation — it
+			// already holds the real original value from the first SetBootOnce call.
 		}
 	} else {
-		// No existing boot-once - capture current boot order
+		// No existing boot-once — capture current boot order and rebootPolicy
 		originalConfig, err := c.captureCurrentBootOrder(vmCopy)
 		if err != nil {
 			return fmt.Errorf("failed to capture boot order: %w", err)
 		}
 		annotations[BootOnceOriginalConfigAnnotation] = originalConfig
 		annotations[BootOnceVMIUIDAnnotation] = currentVMIUID
+		if vmCopy.Spec.Template != nil && vmCopy.Spec.Template.Spec.Domain.RebootPolicy != nil {
+			annotations[BootOnceOriginalRebootPolicyAnnotation] = string(*vmCopy.Spec.Template.Spec.Domain.RebootPolicy)
+		}
 	}
 
 	// Add boot-once label for watch selector
@@ -2408,6 +2414,13 @@ func (c *Client) SetBootOnce(namespace, name, bootTarget string) error {
 	// Modify boot order to boot from target
 	if err := c.modifyVmBootOrder(vmCopy, bootTarget); err != nil {
 		return fmt.Errorf("failed to modify boot order: %w", err)
+	}
+
+	// Set rebootPolicy to Terminate so that KubeVirt destroys the VMI on
+	// guest-initiated reboot and we can detect the VMI UID change.
+	if vmCopy.Spec.Template != nil {
+		terminate := kubevirtv1.RebootPolicyTerminate
+		vmCopy.Spec.Template.Spec.Domain.RebootPolicy = &terminate
 	}
 
 	// Compute merge patch from changes (preserves unknown fields)
@@ -2943,8 +2956,9 @@ const BootOnceLabel = "redfish.boot.once"
 
 // BootOnceAnnotations are the annotation keys used for boot-once state
 const (
-	BootOnceOriginalConfigAnnotation = "redfish.boot.once.original-config"
-	BootOnceVMIUIDAnnotation         = "redfish.boot.once.vmi-uid"
+	BootOnceOriginalConfigAnnotation       = "redfish.boot.once.original-config"
+	BootOnceVMIUIDAnnotation               = "redfish.boot.once.vmi-uid"
+	BootOnceOriginalRebootPolicyAnnotation = "redfish.boot.once.original-reboot-policy"
 )
 
 // Import tracking labels
@@ -3269,6 +3283,23 @@ func (c *Client) handleVMUpdate(vm *kubevirtv1.VirtualMachine) {
 			return
 		}
 
+		// Read the saved original rebootPolicy before removing annotations
+		vmAnnotations := vmCopy.GetAnnotations()
+		originalRebootPolicy := ""
+		if vmAnnotations != nil {
+			originalRebootPolicy = vmAnnotations[BootOnceOriginalRebootPolicyAnnotation]
+		}
+
+		// Restore rebootPolicy on the typed VM
+		if vmCopy.Spec.Template != nil {
+			if originalRebootPolicy != "" {
+				policy := kubevirtv1.RebootPolicy(originalRebootPolicy)
+				vmCopy.Spec.Template.Spec.Domain.RebootPolicy = &policy
+			} else {
+				vmCopy.Spec.Template.Spec.Domain.RebootPolicy = nil
+			}
+		}
+
 		// Remove boot-once label and annotations
 		vmLabels := vmCopy.GetLabels()
 		if vmLabels != nil {
@@ -3276,10 +3307,10 @@ func (c *Client) handleVMUpdate(vm *kubevirtv1.VirtualMachine) {
 			vmCopy.SetLabels(vmLabels)
 		}
 
-		vmAnnotations := vmCopy.GetAnnotations()
 		if vmAnnotations != nil {
 			delete(vmAnnotations, BootOnceOriginalConfigAnnotation)
 			delete(vmAnnotations, BootOnceVMIUIDAnnotation)
+			delete(vmAnnotations, BootOnceOriginalRebootPolicyAnnotation)
 			delete(vmAnnotations, "redfish.boot.source.override.enabled")
 			delete(vmAnnotations, "redfish.boot.source.override.target")
 			delete(vmAnnotations, "redfish.boot.source.override.mode")
@@ -3309,7 +3340,7 @@ func (c *Client) handleVMUpdate(vm *kubevirtv1.VirtualMachine) {
 			return
 		}
 
-		logger.Info("Successfully restored boot order for VM %s/%s after VMI change", namespace, name)
+		logger.Info("Successfully restored boot order and rebootPolicy for VM %s/%s after VMI change", namespace, name)
 	}
 }
 
