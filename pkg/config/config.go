@@ -53,8 +53,10 @@
 package config
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -62,7 +64,9 @@ import (
 	"github.com/kubevirt/redfish-controller/pkg/errors"
 	"github.com/kubevirt/redfish-controller/pkg/kubevirt"
 	"github.com/kubevirt/redfish-controller/pkg/logger"
+	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Config represents the complete application configuration structure.
@@ -115,9 +119,61 @@ type AuthConfig struct {
 // UserConfig represents a Redfish user with authentication credentials and chassis access.
 // Users can be granted access to specific chassis, providing namespace-based access control.
 type UserConfig struct {
-	Username string   `mapstructure:"username"`
-	Password string   `mapstructure:"password"`
-	Chassis  []string `mapstructure:"chassis"`
+	Username string         `mapstructure:"username"`
+	Password PasswordConfig `mapstructure:"password"`
+	Chassis  []string       `mapstructure:"chassis"`
+}
+
+// PasswordConfig holds a user password in either plain-text or bcrypt-hashed form.
+// In YAML the field accepts two shapes:
+//
+//	password: "secret"            # plain text
+//	password:
+//	  hash: "$2a$10$..."          # bcrypt hash
+type PasswordConfig struct {
+	Plain string
+	Hash  string
+}
+
+// MatchesPassword returns true when the supplied plaintext password matches the
+// configured credential. For hashed passwords bcrypt comparison is used; for
+// plain-text passwords a constant-time comparison guards against timing attacks.
+func (p PasswordConfig) MatchesPassword(plaintext string) bool {
+	if p.IsEmpty() || plaintext == "" {
+		return false
+	}
+	if p.Hash != "" {
+		return bcrypt.CompareHashAndPassword([]byte(p.Hash), []byte(plaintext)) == nil
+	}
+	return subtle.ConstantTimeCompare([]byte(p.Plain), []byte(plaintext)) == 1
+}
+
+// IsEmpty returns true when neither plain nor hash value is configured.
+func (p PasswordConfig) IsEmpty() bool {
+	return p.Plain == "" && p.Hash == ""
+}
+
+// passwordDecodeHook is a mapstructure DecodeHookFunc that allows the YAML
+// "password" field to be either a plain string or a map with a "hash" key.
+func passwordDecodeHook(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+	if to != reflect.TypeOf(PasswordConfig{}) {
+		return data, nil
+	}
+
+	switch v := data.(type) {
+	case string:
+		return PasswordConfig{Plain: v}, nil
+	case map[string]interface{}:
+		if hash, ok := v["hash"]; ok {
+			if s, ok := hash.(string); ok {
+				return PasswordConfig{Hash: s}, nil
+			}
+			return nil, fmt.Errorf("password.hash must be a string")
+		}
+		return nil, fmt.Errorf("password map must contain a 'hash' key")
+	default:
+		return data, nil
+	}
 }
 
 // KubeVirtConfig holds KubeVirt-specific configuration parameters.
@@ -208,7 +264,13 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	var config Config
-	if err := viper.Unmarshal(&config); err != nil {
+	if err := viper.Unmarshal(&config, viper.DecodeHook(
+		mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.StringToSliceHookFunc(","),
+			passwordDecodeHook,
+		),
+	)); err != nil {
 		return nil, errors.NewInternalError("Failed to unmarshal config", err)
 	}
 
@@ -367,17 +429,23 @@ func validateAuthConfig(auth *AuthConfig, chassis []ChassisConfig) error {
 			return errors.NewValidationError("Username is required", fmt.Sprintf("authentication.users[%d].username cannot be empty", i))
 		}
 
-		if user.Password == "" {
+		if user.Password.IsEmpty() {
 			return errors.NewValidationError("Password is required", fmt.Sprintf("authentication.users[%d].password cannot be empty", i))
 		}
 
-		// Validate username format
+		if user.Password.Plain != "" && user.Password.Hash != "" {
+			return errors.NewValidationError("Ambiguous password config", fmt.Sprintf("authentication.users[%d].password must specify either a plain value or a hash, not both", i))
+		}
+
 		if !isValidUsername(user.Username) {
 			return errors.NewValidationError("Invalid username format", fmt.Sprintf("authentication.users[%d].username must contain only alphanumeric characters, hyphens, and underscores, got '%s'", i, user.Username))
 		}
 
-		// Validate password strength (basic check)
-		if len(user.Password) < 6 {
+		if user.Password.Hash != "" {
+			if !isValidBcryptHash(user.Password.Hash) {
+				return errors.NewValidationError("Invalid bcrypt hash", fmt.Sprintf("authentication.users[%d].password.hash is not a valid bcrypt hash", i))
+			}
+		} else if len(user.Password.Plain) < 6 {
 			return errors.NewValidationError("Password is too short", fmt.Sprintf("authentication.users[%d].password must be at least 6 characters long", i))
 		}
 
@@ -529,6 +597,11 @@ func isValidUsername(name string) bool {
 	return true
 }
 
+func isValidBcryptHash(hash string) bool {
+	_, err := bcrypt.Cost([]byte(hash))
+	return err == nil
+}
+
 func isValidAPIVersion(version string) bool {
 	return version == "v1"
 }
@@ -570,7 +643,7 @@ func (c *Config) GetChassisByName(name string) (*ChassisConfig, error) {
 // Returns an error if no matching user is found.
 func (c *Config) GetUserByCredentials(username, password string) (*UserConfig, error) {
 	for _, user := range c.Auth.Users {
-		if user.Username == username && user.Password == password {
+		if user.Username == username && user.Password.MatchesPassword(password) {
 			return &user, nil
 		}
 	}

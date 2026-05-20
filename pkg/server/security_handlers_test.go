@@ -20,7 +20,7 @@ func createTestConfig() *config.Config {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"chassis1"},
 				},
 			},

@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/kubevirt/redfish-controller/pkg/errors"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -229,7 +230,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -269,7 +270,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -304,7 +305,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -344,7 +345,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -373,7 +374,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{},
 						},
 					},
@@ -408,7 +409,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test_chassis"},
 						},
 					},
@@ -443,7 +444,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -505,7 +506,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "123", // Too short
+							Password: PasswordConfig{Plain: "123"}, // Too short
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -539,7 +540,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"non-existent-chassis"},
 						},
 					},
@@ -578,7 +579,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -612,12 +613,12 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 						{
 							Username: "admin", // Duplicate username
-							Password: "admin456",
+							Password: PasswordConfig{Plain: "admin456"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -651,7 +652,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -685,7 +686,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -719,7 +720,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -753,7 +754,7 @@ func TestValidateConfig(t *testing.T) {
 					Users: []UserConfig{
 						{
 							Username: "admin",
-							Password: "admin123",
+							Password: PasswordConfig{Plain: "admin123"},
 							Chassis:  []string{"test-chassis"},
 						},
 					},
@@ -822,7 +823,7 @@ func TestEnvironmentVariableOverrides(t *testing.T) {
 			Users: []UserConfig{
 				{
 					Username: "admin",
-					Password: "admin123",
+					Password: PasswordConfig{Plain: "admin123"},
 					Chassis:  []string{"test-chassis"},
 				},
 			},
@@ -977,11 +978,11 @@ func TestGetUserByCredentials(t *testing.T) {
 			Users: []UserConfig{
 				{
 					Username: "user1",
-					Password: "pass1",
+					Password: PasswordConfig{Plain: "pass1"},
 				},
 				{
 					Username: "user2",
-					Password: "pass2",
+					Password: PasswordConfig{Plain: "pass2"},
 				},
 			},
 		},
@@ -1015,12 +1016,12 @@ func TestGetChassisForUser(t *testing.T) {
 			Users: []UserConfig{
 				{
 					Username: "user1",
-					Password: "pass1",
+					Password: PasswordConfig{Plain: "pass1"},
 					Chassis:  []string{"chassis1", "chassis2"},
 				},
 				{
 					Username: "user2",
-					Password: "pass2",
+					Password: PasswordConfig{Plain: "pass2"},
 					Chassis:  []string{"chassis3"},
 				},
 			},
@@ -1243,4 +1244,238 @@ func TestGetDataVolumeConfigWithNilConfig(t *testing.T) {
 	}()
 
 	config.GetDataVolumeConfig()
+}
+
+func mustHashPassword(t *testing.T, plain string) string {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("bcrypt.GenerateFromPassword failed: %v", err)
+	}
+	return string(hash)
+}
+
+func TestPasswordConfigMatchesPassword(t *testing.T) {
+	hash := mustHashPassword(t, "secret123")
+
+	tests := []struct {
+		name      string
+		config    PasswordConfig
+		plaintext string
+		want      bool
+	}{
+		{"plain match", PasswordConfig{Plain: "secret123"}, "secret123", true},
+		{"plain mismatch", PasswordConfig{Plain: "secret123"}, "wrong", false},
+		{"hash match", PasswordConfig{Hash: hash}, "secret123", true},
+		{"hash mismatch", PasswordConfig{Hash: hash}, "wrong", false},
+		{"hash as password rejected", PasswordConfig{Hash: hash}, hash, false},
+		{"empty config never matches", PasswordConfig{}, "anything", false},
+		{"empty plain rejects empty input", PasswordConfig{Plain: ""}, "", false},
+		{"empty hash rejects empty input", PasswordConfig{Hash: ""}, "", false},
+		{"plain rejects empty input", PasswordConfig{Plain: "secret123"}, "", false},
+		{"hash rejects empty input", PasswordConfig{Hash: hash}, "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.config.MatchesPassword(tc.plaintext)
+			if got != tc.want {
+				t.Errorf("MatchesPassword(%q) = %v, want %v", tc.plaintext, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPasswordConfigIsEmpty(t *testing.T) {
+	if !(PasswordConfig{}).IsEmpty() {
+		t.Error("zero-value PasswordConfig should be empty")
+	}
+	if (PasswordConfig{Plain: "x"}).IsEmpty() {
+		t.Error("PasswordConfig with Plain should not be empty")
+	}
+	if (PasswordConfig{Hash: "x"}).IsEmpty() {
+		t.Error("PasswordConfig with Hash should not be empty")
+	}
+}
+
+func TestValidateConfig_HashedPassword(t *testing.T) {
+	hash := mustHashPassword(t, "admin123")
+
+	base := func() *Config {
+		return &Config{
+			Server: ServerConfig{Host: "0.0.0.0", Port: 8443},
+			Chassis: []ChassisConfig{{
+				Name: "test-chassis", Namespace: "test-namespace", ServiceAccount: "test-sa",
+			}},
+			KubeVirt:           KubeVirtConfig{APIVersion: "v1", Timeout: 30},
+			DataVolume:         DataVolumeConfig{StorageSize: "10Gi", HelperImage: "alpine:latest"},
+			SystemIDConvention: "legacy",
+		}
+	}
+
+	tests := []struct {
+		name    string
+		users   []UserConfig
+		wantErr bool
+	}{
+		{
+			name: "valid bcrypt hash",
+			users: []UserConfig{{
+				Username: "admin", Password: PasswordConfig{Hash: hash}, Chassis: []string{"test-chassis"},
+			}},
+		},
+		{
+			name: "invalid bcrypt hash string",
+			users: []UserConfig{{
+				Username: "admin", Password: PasswordConfig{Hash: "not-a-hash"}, Chassis: []string{"test-chassis"},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "both plain and hash set",
+			users: []UserConfig{{
+				Username: "admin", Password: PasswordConfig{Plain: "admin123", Hash: hash}, Chassis: []string{"test-chassis"},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "neither plain nor hash set",
+			users: []UserConfig{{
+				Username: "admin", Password: PasswordConfig{}, Chassis: []string{"test-chassis"},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "empty plain password string",
+			users: []UserConfig{{
+				Username: "admin", Password: PasswordConfig{Plain: ""}, Chassis: []string{"test-chassis"},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "empty hash string",
+			users: []UserConfig{{
+				Username: "admin", Password: PasswordConfig{Hash: ""}, Chassis: []string{"test-chassis"},
+			}},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			cfg.Auth = AuthConfig{Users: tc.users}
+			err := validateConfig(cfg)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateConfig() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestGetUserByCredentials_HashedPassword(t *testing.T) {
+	hash := mustHashPassword(t, "secret123")
+
+	cfg := &Config{
+		Auth: AuthConfig{
+			Users: []UserConfig{
+				{Username: "plain-user", Password: PasswordConfig{Plain: "plainpw"}},
+				{Username: "hash-user", Password: PasswordConfig{Hash: hash}},
+			},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		username string
+		password string
+		wantUser string
+		wantErr  bool
+	}{
+		{"plain user correct password", "plain-user", "plainpw", "plain-user", false},
+		{"plain user wrong password", "plain-user", "wrong", "", true},
+		{"hash user correct password", "hash-user", "secret123", "hash-user", false},
+		{"hash user wrong password", "hash-user", "wrong", "", true},
+		{"hash user raw hash as password", "hash-user", hash, "", true},
+		{"non-existent user", "nobody", "x", "", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			user, err := cfg.GetUserByCredentials(tc.username, tc.password)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetUserByCredentials() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && user.Username != tc.wantUser {
+				t.Errorf("got username %q, want %q", user.Username, tc.wantUser)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_HashedPasswordYAML(t *testing.T) {
+	hash := mustHashPassword(t, "hashed-pass")
+
+	configContent := `
+server:
+  host: "127.0.0.1"
+  port: 8443
+  tls:
+    enabled: false
+
+chassis:
+  - name: "test-cluster"
+    namespace: "test-namespace"
+    service_account: "test-sa"
+
+authentication:
+  users:
+    - username: "plain-user"
+      password: "plainpw"
+      chassis: ["test-cluster"]
+    - username: "hash-user"
+      password:
+        hash: "` + hash + `"
+      chassis: ["test-cluster"]
+
+kubevirt:
+  api_version: "v1"
+  timeout: 30
+`
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "test-config.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if len(cfg.Auth.Users) != 2 {
+		t.Fatalf("Expected 2 users, got %d", len(cfg.Auth.Users))
+	}
+
+	plainUser := cfg.Auth.Users[0]
+	if plainUser.Password.Plain != "plainpw" {
+		t.Errorf("Expected plain password 'plainpw', got Plain=%q Hash=%q", plainUser.Password.Plain, plainUser.Password.Hash)
+	}
+
+	hashUser := cfg.Auth.Users[1]
+	if hashUser.Password.Hash != hash {
+		t.Errorf("Expected hash %q, got Plain=%q Hash=%q", hash, hashUser.Password.Plain, hashUser.Password.Hash)
+	}
+
+	// Verify authentication works through the loaded config
+	if _, err := cfg.GetUserByCredentials("plain-user", "plainpw"); err != nil {
+		t.Errorf("plain-user auth failed: %v", err)
+	}
+	if _, err := cfg.GetUserByCredentials("hash-user", "hashed-pass"); err != nil {
+		t.Errorf("hash-user auth failed: %v", err)
+	}
+	if _, err := cfg.GetUserByCredentials("hash-user", "wrong"); err == nil {
+		t.Error("hash-user auth should fail with wrong password")
+	}
 }
