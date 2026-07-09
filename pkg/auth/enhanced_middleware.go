@@ -345,7 +345,6 @@ func (m *EnhancedMiddleware) extractAndValidateCredentialsEnhanced(r *http.Reque
 
 	return &User{
 		Username: user.Username,
-		Password: user.Password,
 		Chassis:  user.Chassis,
 	}, nil
 }

@@ -173,11 +173,15 @@ chassis:
 
 authentication:
   users:
+    # Plain-text password (simple, but stored in clear text)
     - username: "admin"
       password: "changeme"  # CHANGE THIS PASSWORD!
       chassis: ["chassis-0"]
+
+    # Bcrypt-hashed password (recommended for production)
     - username: "user"
-      password: "changeme"  # CHANGE THIS PASSWORD!
+      password:
+        hash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
       chassis: ["chassis-1"]
 
 # =============================================================================
@@ -190,6 +194,28 @@ datavolume:
   storage_class: "lvms-vg1"
   vm_update_timeout: "2m"
   iso_download_timeout: "30m"
+```
+
+### Generating bcrypt password hashes
+
+User passwords can be stored as bcrypt hashes instead of plain text. To generate a hash, use any of the following commands on a standard Linux machine:
+
+```bash
+# Using htpasswd (Apache utilities)
+htpasswd -nbB "" 'YourPassword' | cut -d: -f2
+
+# Using Python 3
+python3 -c "import bcrypt; print(bcrypt.hashpw(b'YourPassword', bcrypt.gensalt()).decode())"
+
+# Using mkpasswd (from the whois package on Debian/Ubuntu)
+mkpasswd --method=bcrypt 'YourPassword'
+```
+
+Place the resulting hash (starting with `$2a$`, `$2b$`, or `$2y$`) into the config:
+
+```yaml
+password:
+  hash: "$2a$10$..."
 ```
 
 ## Usage

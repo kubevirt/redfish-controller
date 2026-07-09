@@ -55,17 +55,18 @@ import (
 	"github.com/kubevirt/redfish-controller/pkg/logger"
 )
 
-// User represents an authenticated user with access permissions.
-// It contains user credentials and chassis access information for authorization.
+// User represents an _authenticated_ user with access permissions.
+// It contains user name and chassis access information for authorization.
+// The instance must never be created for unauthenticated users.
 type User struct {
 	Username string   // User's username
-	Password string   // User's password (hashed in production)
 	Chassis  []string // List of chassis names the user can access
 }
 
 // AuthContext represents the authentication context for a request.
 // It contains user information and is injected into the request context
 // for downstream handlers to access authentication data.
+// The instance must never be created for unauthenticated users.
 type AuthContext struct {
 	User    *User  // Authenticated user
 	Chassis string // Current chassis being accessed
@@ -226,7 +227,6 @@ func (m *Middleware) extractAndValidateCredentials(r *http.Request) (*User, erro
 
 	return &User{
 		Username: user.Username,
-		Password: user.Password,
 		Chassis:  user.Chassis,
 	}, nil
 }
@@ -318,6 +318,7 @@ func GetAuthContext(r *http.Request) *AuthContext {
 
 // GetUser extracts user information from the request.
 // It provides a convenient way to access user data in request handlers.
+// This MUST only be called for authenticated requests.
 //
 // Parameters:
 // - r: HTTP request containing authentication context

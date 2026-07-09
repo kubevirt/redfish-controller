@@ -56,7 +56,7 @@ func TestNewServer(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"chassis1"},
 				},
 			},
@@ -639,7 +639,7 @@ func TestServerCreateMux(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"chassis1"},
 				},
 			},
@@ -963,12 +963,12 @@ func testServer(t *testing.T) *Server {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"chassis1"},
 				},
 				{
 					Username: "noaccess",
-					Password: "noaccess",
+					Password: config.PasswordConfig{Plain: "noaccess"},
 					Chassis:  []string{},
 				},
 			},
@@ -1094,7 +1094,6 @@ func TestHandleChassisCollection(t *testing.T) {
 		// Set up authentication context manually for testing
 		user := &auth.User{
 			Username: "testuser",
-			Password: "testpass",
 			Chassis:  []string{"chassis1"},
 		}
 		authCtx := &auth.AuthContext{
@@ -1144,7 +1143,6 @@ func TestHandleChassisCollection(t *testing.T) {
 		// Set up authentication context manually for testing
 		user := &auth.User{
 			Username: "noaccess",
-			Password: "noaccess",
 			Chassis:  []string{},
 		}
 		authCtx := &auth.AuthContext{
@@ -1181,7 +1179,6 @@ func TestHandleChassis(t *testing.T) {
 		// Set up authentication context manually for testing
 		user := &auth.User{
 			Username: "testuser",
-			Password: "testpass",
 			Chassis:  []string{"chassis1"},
 		}
 		authCtx := &auth.AuthContext{
@@ -1228,7 +1225,6 @@ func TestHandleSystemsCollection(t *testing.T) {
 		// Set up authentication context manually for testing
 		user := &auth.User{
 			Username: "testuser",
-			Password: "testpass",
 			Chassis:  []string{"chassis1"},
 		}
 		authCtx := &auth.AuthContext{
@@ -1353,7 +1349,6 @@ func TestHandleManager(t *testing.T) {
 		// Set up authentication context manually for testing
 		user := &auth.User{
 			Username: "testuser",
-			Password: "testpass",
 			Chassis:  []string{"chassis1"},
 		}
 		authCtx := &auth.AuthContext{
@@ -1550,7 +1545,6 @@ func TestHandleSystem(t *testing.T) {
 		// Set up authentication context manually for testing
 		user := &auth.User{
 			Username: "testuser",
-			Password: "testpass",
 			Chassis:  []string{"chassis1"},
 		}
 		authCtx := &auth.AuthContext{
@@ -1690,7 +1684,6 @@ func TestHandlePowerAction(t *testing.T) {
 		// Set up authentication context manually for testing
 		user := &auth.User{
 			Username: "testuser",
-			Password: "testpass",
 			Chassis:  []string{"chassis1"},
 		}
 		authCtx := &auth.AuthContext{
@@ -1745,7 +1738,6 @@ func TestHandlePowerAction(t *testing.T) {
 		// Set up authentication context manually for testing
 		user := &auth.User{
 			Username: "testuser",
-			Password: "testpass",
 			Chassis:  []string{"chassis1"},
 		}
 		authCtx := &auth.AuthContext{
@@ -1800,7 +1792,6 @@ func TestHandlePowerAction(t *testing.T) {
 				// Set up authentication context manually for testing
 				user := &auth.User{
 					Username: "testuser",
-					Password: "testpass",
 					Chassis:  []string{"chassis1"},
 				}
 				authCtx := &auth.AuthContext{
@@ -1858,7 +1849,7 @@ func TestHandleSystem_HeaderSanitization(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"chassis1"},
 				},
 			},
@@ -1873,7 +1864,6 @@ func TestHandleSystem_HeaderSanitization(t *testing.T) {
 	authCtx := &auth.AuthContext{
 		User: &auth.User{
 			Username: "testuser",
-			Password: "testpass",
 			Chassis:  []string{"chassis1"},
 		},
 		Chassis: "chassis1",
@@ -2059,7 +2049,6 @@ func TestHandleBootUpdate(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2092,7 +2081,6 @@ func TestHandleBootUpdate(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2126,7 +2114,6 @@ func TestHandleBootUpdate(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2176,7 +2163,6 @@ func TestHandleBootUpdate(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2208,7 +2194,6 @@ func TestHandleBootUpdate(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2241,7 +2226,6 @@ func TestHandleBootUpdate(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2274,7 +2258,6 @@ func TestHandleBootUpdate(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2305,7 +2288,6 @@ func TestHandleBootUpdate(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2351,7 +2333,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2380,7 +2361,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2409,7 +2389,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2441,7 +2420,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2470,7 +2448,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2499,7 +2476,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2527,7 +2503,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2556,7 +2531,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2585,7 +2559,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2614,7 +2587,6 @@ func TestHandleVirtualMediaRequest(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2661,7 +2633,6 @@ func TestHandleVirtualMediaCollection(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2706,7 +2677,6 @@ func TestHandleVirtualMediaCollection(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"other-chassis"},
 			},
 			Chassis: "other-chassis",
@@ -2734,7 +2704,6 @@ func TestHandleVirtualMediaCollection(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2780,7 +2749,6 @@ func TestHandleGetVirtualMedia(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2825,7 +2793,6 @@ func TestHandleGetVirtualMedia(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"other-chassis"},
 			},
 			Chassis: "other-chassis",
@@ -2853,7 +2820,6 @@ func TestHandleGetVirtualMedia(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2881,7 +2847,6 @@ func TestHandleGetVirtualMedia(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2934,7 +2899,6 @@ func TestHandleBootUpdateDirect(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -2967,7 +2931,6 @@ func TestHandleBootUpdateDirect(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -3001,7 +2964,6 @@ func TestHandleBootUpdateDirect(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -3051,7 +3013,6 @@ func TestHandleBootUpdateDirect(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "testuser",
-				Password: "testpass",
 				Chassis:  []string{"chassis1"},
 			},
 			Chassis: "chassis1",
@@ -3126,7 +3087,7 @@ func TestResolveSystemVM_VMSelectorFiltering(t *testing.T) {
 		},
 		Auth: config.AuthConfig{
 			Users: []config.UserConfig{
-				{Username: "user1", Password: "pass1", Chassis: []string{"chassis-a", "chassis-b"}},
+				{Username: "user1", Password: config.PasswordConfig{Plain: "pass1"}, Chassis: []string{"chassis-a", "chassis-b"}},
 			},
 		},
 		Chassis: []config.ChassisConfig{
@@ -3154,7 +3115,6 @@ func TestResolveSystemVM_VMSelectorFiltering(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "user1",
-				Password: "pass1",
 				Chassis:  []string{"chassis-a", "chassis-b"},
 			},
 		}
@@ -3235,7 +3195,6 @@ func TestResolveSystemVM_VMSelectorFiltering(t *testing.T) {
 		authCtx := &auth.AuthContext{
 			User: &auth.User{
 				Username: "limited",
-				Password: "pass",
 				Chassis:  []string{"chassis-x"},
 			},
 		}
@@ -3266,7 +3225,7 @@ func TestResolveSystemVM_NilSelector(t *testing.T) {
 		Server: config.ServerConfig{Host: "localhost", Port: 8080, TestMode: true},
 		Auth: config.AuthConfig{
 			Users: []config.UserConfig{
-				{Username: "admin", Password: "pass", Chassis: []string{"open-chassis"}},
+				{Username: "admin", Password: config.PasswordConfig{Plain: "pass12"}, Chassis: []string{"open-chassis"}},
 			},
 		},
 		Chassis: []config.ChassisConfig{
@@ -3281,7 +3240,7 @@ func TestResolveSystemVM_NilSelector(t *testing.T) {
 	srv := NewServer(cfg, client)
 	req := httptest.NewRequest("GET", "/", nil)
 	authCtx := &auth.AuthContext{
-		User: &auth.User{Username: "admin", Password: "pass", Chassis: []string{"open-chassis"}},
+		User: &auth.User{Username: "admin", Chassis: []string{"open-chassis"}},
 	}
 	r := req.WithContext(logger.WithAuth(req.Context(), authCtx))
 
@@ -3327,7 +3286,7 @@ func TestResolveSystemVM_NameSelector(t *testing.T) {
 		Server: config.ServerConfig{Host: "localhost", Port: 8080, TestMode: true},
 		Auth: config.AuthConfig{
 			Users: []config.UserConfig{
-				{Username: "u", Password: "p", Chassis: []string{"c1"}},
+				{Username: "u", Password: config.PasswordConfig{Plain: "passwd"}, Chassis: []string{"c1"}},
 			},
 		},
 		Chassis: []config.ChassisConfig{
@@ -3345,7 +3304,7 @@ func TestResolveSystemVM_NameSelector(t *testing.T) {
 	makeReq := func() *http.Request {
 		req := httptest.NewRequest("GET", "/", nil)
 		authCtx := &auth.AuthContext{
-			User: &auth.User{Username: "u", Password: "p", Chassis: []string{"c1"}},
+			User: &auth.User{Username: "u", Chassis: []string{"c1"}},
 		}
 		return req.WithContext(logger.WithAuth(req.Context(), authCtx))
 	}

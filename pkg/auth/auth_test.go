@@ -28,6 +28,7 @@ import (
 
 	"github.com/kubevirt/redfish-controller/pkg/config"
 	"github.com/kubevirt/redfish-controller/pkg/logger"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // =============================================================================
@@ -40,7 +41,7 @@ func TestNewMiddleware(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"test-chassis"},
 				},
 			},
@@ -99,7 +100,7 @@ func TestExtractAndValidateCredentials(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"test-chassis"},
 				},
 			},
@@ -170,7 +171,6 @@ func TestHasChassisAccess(t *testing.T) {
 
 	user := &User{
 		Username: "testuser",
-		Password: "testpass",
 		Chassis:  []string{"chassis1", "chassis2"},
 	}
 
@@ -217,7 +217,7 @@ func TestAuthenticateMiddleware(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"test-chassis"},
 				},
 			},
@@ -320,7 +320,11 @@ func TestGetChassis(t *testing.T) {
 	}
 }
 
-func TestHasChassisAccessFromRequest(t *testing.T) {
+// TestHasChassisAccessFromRequest verifies chassis-level authorization only.
+// Password authentication is tested separately in TestAuthenticateMiddleware
+// and TestAuthenticateMiddleware_HashedPassword; here we assume the user is
+// already authenticated and only check whether the chassis list grants access.
+func TestHasChassisAccessFromAuthenticatedRequest(t *testing.T) {
 	tests := []struct {
 		name           string
 		setupRequest   func() *http.Request
@@ -336,11 +340,10 @@ func TestHasChassisAccessFromRequest(t *testing.T) {
 			expectedAccess: false,
 		},
 		{
-			name: "user with matching chassis access",
+			name: "authenticated user with matching chassis is authorized",
 			setupRequest: func() *http.Request {
 				user := &User{
 					Username: "testuser",
-					Password: "testpass",
 					Chassis:  []string{"chassis1", "chassis2", "test-chassis"},
 				}
 				authCtx := &AuthContext{
@@ -355,11 +358,10 @@ func TestHasChassisAccessFromRequest(t *testing.T) {
 			expectedAccess: true,
 		},
 		{
-			name: "user without matching chassis access",
+			name: "authenticated user without matching chassis is denied",
 			setupRequest: func() *http.Request {
 				user := &User{
 					Username: "testuser",
-					Password: "testpass",
 					Chassis:  []string{"chassis1", "chassis2"},
 				}
 				authCtx := &AuthContext{
@@ -378,7 +380,6 @@ func TestHasChassisAccessFromRequest(t *testing.T) {
 			setupRequest: func() *http.Request {
 				user := &User{
 					Username: "testuser",
-					Password: "testpass",
 					Chassis:  []string{},
 				}
 				authCtx := &AuthContext{
@@ -397,7 +398,6 @@ func TestHasChassisAccessFromRequest(t *testing.T) {
 			setupRequest: func() *http.Request {
 				user := &User{
 					Username: "testuser",
-					Password: "testpass",
 					Chassis:  nil,
 				}
 				authCtx := &AuthContext{
@@ -416,7 +416,6 @@ func TestHasChassisAccessFromRequest(t *testing.T) {
 			setupRequest: func() *http.Request {
 				user := &User{
 					Username: "testuser",
-					Password: "testpass",
 					Chassis:  []string{"chassis1", "chassis2"},
 				}
 				authCtx := &AuthContext{
@@ -515,12 +514,12 @@ func TestMiddlewareWithMultipleUsers(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "user1",
-					Password: "pass1",
+					Password: config.PasswordConfig{Plain: "pass1"},
 					Chassis:  []string{"chassis1"},
 				},
 				{
 					Username: "user2",
-					Password: "pass2",
+					Password: config.PasswordConfig{Plain: "pass2"},
 					Chassis:  []string{"chassis2"},
 				},
 			},
@@ -597,7 +596,7 @@ func TestNewEnhancedMiddleware(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"chassis1"},
 				},
 			},
@@ -789,17 +788,17 @@ func TestEnhancedMiddleware_HasChassisAccess_Enhanced(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "user1",
-					Password: "pass1",
+					Password: config.PasswordConfig{Plain: "pass1"},
 					Chassis:  []string{"chassis1", "chassis2"},
 				},
 				{
 					Username: "user2",
-					Password: "pass2",
+					Password: config.PasswordConfig{Plain: "pass2"},
 					Chassis:  []string{"chassis2"},
 				},
 				{
 					Username: "admin",
-					Password: "admin",
+					Password: config.PasswordConfig{Plain: "admin1"},
 					Chassis:  []string{"*"}, // Wildcard access
 				},
 			},
@@ -1174,12 +1173,12 @@ func TestEnhancedMiddleware_Authenticate(t *testing.T) {
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"chassis1"},
 				},
 				{
 					Username: "admin",
-					Password: "adminpass",
+					Password: config.PasswordConfig{Plain: "adminpass"},
 					Chassis:  []string{"chassis1", "chassis2"},
 				},
 			},
@@ -1253,7 +1252,7 @@ func TestEnhancedMiddleware_ExtractAndValidateCredentialsEnhanced(t *testing.T) 
 			Users: []config.UserConfig{
 				{
 					Username: "testuser",
-					Password: "testpass",
+					Password: config.PasswordConfig{Plain: "testpass"},
 					Chassis:  []string{"chassis1"},
 				},
 			},
@@ -1502,5 +1501,143 @@ func TestEnhancedMiddleware_LogSecurityEvent_Enhanced(t *testing.T) {
 
 	if len(middleware.securityEvents) > middleware.maxEvents {
 		t.Errorf("Expected events to be limited to %d, got %d", middleware.maxEvents, len(middleware.securityEvents))
+	}
+}
+
+func mustBcryptHash(t *testing.T, plain string) string {
+	t.Helper()
+	h, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("bcrypt hash: %v", err)
+	}
+	return string(h)
+}
+
+func TestAuthenticateMiddleware_HashedPassword(t *testing.T) {
+	hash := mustBcryptHash(t, "testpass")
+
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Users: []config.UserConfig{
+				{
+					Username: "hashuser",
+					Password: config.PasswordConfig{Hash: hash},
+					Chassis:  []string{"test-chassis"},
+				},
+			},
+		},
+	}
+
+	middleware := NewMiddleware(cfg)
+
+	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCtx := GetAuthContext(r)
+		if authCtx == nil {
+			http.Error(w, "no auth context", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		name           string
+		authHeader     string
+		path           string
+		expectedStatus int
+	}{
+		{
+			name:           "correct password against hashed config",
+			authHeader:     "Basic " + base64.StdEncoding.EncodeToString([]byte("hashuser:testpass")),
+			path:           "/redfish/v1/Chassis/test-chassis/Systems",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "wrong password against hashed config",
+			authHeader:     "Basic " + base64.StdEncoding.EncodeToString([]byte("hashuser:wrongpass")),
+			path:           "/redfish/v1/Chassis/test-chassis/Systems",
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name:           "raw hash string as password is rejected",
+			authHeader:     "Basic " + base64.StdEncoding.EncodeToString([]byte("hashuser:"+hash)),
+			path:           "/redfish/v1/Chassis/test-chassis/Systems",
+			expectedStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tc.path, nil)
+			req.Header.Set("Authorization", tc.authHeader)
+
+			w := httptest.NewRecorder()
+			middleware.Authenticate(testHandler).ServeHTTP(w, req)
+
+			if w.Code != tc.expectedStatus {
+				t.Errorf("Expected status %d, got %d", tc.expectedStatus, w.Code)
+			}
+		})
+	}
+}
+
+func TestEnhancedMiddleware_HashedPassword(t *testing.T) {
+	hash := mustBcryptHash(t, "testpass")
+
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Users: []config.UserConfig{
+				{
+					Username: "hashuser",
+					Password: config.PasswordConfig{Hash: hash},
+					Chassis:  []string{"chassis1"},
+				},
+			},
+		},
+	}
+
+	middleware := NewEnhancedMiddleware(cfg)
+
+	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		name           string
+		authHeader     string
+		path           string
+		expectedStatus int
+	}{
+		{
+			name:           "correct password against hashed config",
+			authHeader:     "Basic " + base64.StdEncoding.EncodeToString([]byte("hashuser:testpass")),
+			path:           "/redfish/v1/Chassis/chassis1/Systems",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "wrong password against hashed config",
+			authHeader:     "Basic " + base64.StdEncoding.EncodeToString([]byte("hashuser:wrong")),
+			path:           "/redfish/v1/Chassis/chassis1/Systems",
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name:           "raw hash string as password is rejected",
+			authHeader:     "Basic " + base64.StdEncoding.EncodeToString([]byte("hashuser:"+hash)),
+			path:           "/redfish/v1/Chassis/chassis1/Systems",
+			expectedStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tc.path, nil)
+			req.Header.Set("Authorization", tc.authHeader)
+
+			w := httptest.NewRecorder()
+			middleware.Authenticate(testHandler).ServeHTTP(w, req)
+
+			if w.Code != tc.expectedStatus {
+				t.Errorf("Expected status %d, got %d", tc.expectedStatus, w.Code)
+			}
+		})
 	}
 }
