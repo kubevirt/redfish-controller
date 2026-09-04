@@ -2,7 +2,7 @@
 set -e
 
 # Script to build and push container to registry using Buildah
-# Usage: ./scripts/build-and-push-container.sh <tag>
+# Usage: ./hack/build-and-push-container.sh <tag>
 #
 # Environment variables:
 #   REGISTRY: Container registry (default: quay.io)
