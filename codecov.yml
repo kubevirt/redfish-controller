@@ -33,7 +33,7 @@ comment:
 ignore:
   - "cmd/main_test.go"
   - "test/"
-  - "scripts/"
+  - "hack/"
   - "helm/"
   - "*.md"
   - "*.yml"

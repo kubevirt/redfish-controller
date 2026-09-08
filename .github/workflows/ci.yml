@@ -27,46 +27,15 @@ jobs:
         go-version: ${{ env.GO_VERSION }}
         cache: true
         
-    - name: Validate Go module
+    - name: Install lint tool
+      run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+    - name: Run validation targets
       run: |
-        echo "Validating Go module..."
-        go mod download
-        go mod verify
-        
-    - name: Check code formatting
-      run: |
-        echo "Checking code formatting..."
-        go fmt ./...
-        # Check if any files were changed by go fmt
-        if [ -n "$(git status --porcelain)" ]; then
-          echo "Code is not properly formatted. Run 'go fmt ./...' to fix."
-          git diff
-          exit 1
-        fi
-        
-    - name: Tidy Go modules
-      run: |
-        echo "Tidying Go modules..."
-        go mod tidy
-        # Check if go.mod or go.sum were changed
-        if [ -n "$(git status --porcelain go.mod go.sum)" ]; then
-          echo "Go modules are not tidy. Run 'go mod tidy' to fix."
-          git diff go.mod go.sum
-          exit 1
-        fi
-        
-    - name: Run static analysis
-      run: |
-        echo "Running static analysis..."
-        go vet ./...
-        
-    - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v9
-      with:
-        version: latest
-        args: --timeout=5m
-        only-new-issues: true
-      continue-on-error: true
+        make fmt-check
+        make tidy-check
+        make vet
+        make lint
 
   # Code quality checks
   code-quality:
@@ -119,16 +88,10 @@ jobs:
         cache: true
         
     - name: Run tests
-      run: |
-        echo "Running tests..."
-        go test -v ./...
-        
+      run: make test
+
     - name: Run tests with coverage
-      run: |
-        echo "Running tests with coverage..."
-        go test -v -coverprofile=coverage.out ./...
-        echo "Coverage summary:"
-        go tool cover -func=coverage.out
+      run: make test-coverage
         
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v6
@@ -145,8 +108,8 @@ jobs:
         path: coverage.out
         retention-days: 7
 
-  # Integration test
-  integration-test:
+  # Smoke test
+  smoke-test:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -159,19 +122,8 @@ jobs:
         go-version: ${{ env.GO_VERSION }}
         cache: true
         
-    - name: Run integration tests
-      run: |
-        echo "Ensuring dependencies are up to date..."
-        go mod download
-        go mod tidy
-        echo "Running integration tests..."
-        go build -o kubevirt-redfish ./cmd/main.go
-        echo "Binary built successfully"
-        ./kubevirt-redfish --help || echo "Help command completed"
-        echo "Creating test configuration..."
-        ./kubevirt-redfish --create-config test-config.yaml
-        echo "Test configuration created successfully"
-        ls -la test-config.yaml
+    - name: Run smoke tests
+      run: make smoke-test
 
   # Security scan
   security-scan:
@@ -224,14 +176,8 @@ jobs:
         
     - name: Build binary
       run: |
-        echo "Ensuring dependencies are up to date..."
-        go mod download
-        go mod tidy
-        echo "Building kubevirt-redfish binary..."
-        go build -ldflags="-w -s" -o kubevirt-redfish ./cmd/main.go
-        echo "Build completed successfully"
+        make build
         ls -la kubevirt-redfish
-        echo "Testing binary..."
         ./kubevirt-redfish --version || echo "Version command completed"
         
     - name: Upload binary artifact
