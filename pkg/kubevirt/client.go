@@ -1701,9 +1701,9 @@ func (c *Client) insertVirtualMediaAsync(namespace, name, mediaID, imageURL stri
 	logger.Debug("insertVirtualMediaAsync called - namespace=%s, name=%s, mediaID=%s, imageURL=%s", namespace, name, mediaID, imageURL)
 
 	// Get DataVolume configuration first to determine timeouts
-	storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := c.getDataVolumeConfig()
-	logger.Info("Using DataVolume config: storageSize=%s, allowInsecureTLS=%v, storageClass=%s, vmUpdateTimeout=%s, isoDownloadTimeout=%s, helperImage=%s", storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage)
-	logger.Debug("DataVolume config - storageSize=%s, allowInsecureTLS=%v, storageClass=%s, vmUpdateTimeout=%s, isoDownloadTimeout=%s, helperImage=%s", storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage)
+	storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := c.getDataVolumeConfig()
+	logger.Info("Using DataVolume config: storageSize=%s, allowInsecureTLS=%v, certConfigMap=%s, storageClass=%s, vmUpdateTimeout=%s, isoDownloadTimeout=%s, helperImage=%s", storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage)
+	logger.Debug("DataVolume config - storageSize=%s, allowInsecureTLS=%v, certConfigMap=%s, storageClass=%s, vmUpdateTimeout=%s, isoDownloadTimeout=%s, helperImage=%s", storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage)
 
 	// Parse timeout for VM update
 	vmUpdateDuration, err := time.ParseDuration(vmUpdateTimeout)
@@ -1938,7 +1938,8 @@ func (c *Client) insertVirtualMediaAsync(namespace, name, mediaID, imageURL stri
 			Spec: cdiv1beta1.VolumeImportSourceSpec{
 				Source: &cdiv1beta1.ImportSourceType{
 					HTTP: &cdiv1beta1.DataVolumeSourceHTTP{
-						URL: imageURL,
+						URL:           imageURL,
+						CertConfigMap: certConfigMap,
 					},
 				},
 			},
@@ -2021,7 +2022,7 @@ func (c *Client) insertVirtualMediaAsync(namespace, name, mediaID, imageURL stri
 func (c *Client) copyISOToPVC(namespace, dataVolumeName, imageURL, isoDownloadTimeout, vmName, deviceName string) error {
 	logger.Info("Copying ISO from %s to PVC for DataVolume %s", imageURL, dataVolumeName)
 
-	_, _, _, _, configISODownloadTimeout, helperImage := c.getDataVolumeConfig()
+	_, _, _, _, _, configISODownloadTimeout, helperImage := c.getDataVolumeConfig()
 
 	if isoDownloadTimeout == "" {
 		isoDownloadTimeout = configISODownloadTimeout
@@ -2776,10 +2777,11 @@ func (c *Client) GetVMNetworkDetails(namespace, name string) ([]map[string]inter
 }
 
 // getDataVolumeConfig returns DataVolume configuration from app config
-func (c *Client) getDataVolumeConfig() (storageSize string, allowInsecureTLS bool, storageClass string, vmUpdateTimeout string, isoDownloadTimeout string, helperImage string) {
+func (c *Client) getDataVolumeConfig() (storageSize string, allowInsecureTLS bool, certConfigMap string, storageClass string, vmUpdateTimeout string, isoDownloadTimeout string, helperImage string) {
 	// Default values
 	storageSize = "10Gi"
 	allowInsecureTLS = false
+	certConfigMap = ""
 	storageClass = "" // Empty means use default storage class
 	vmUpdateTimeout = "30s"
 	isoDownloadTimeout = "30m"
@@ -2789,10 +2791,10 @@ func (c *Client) getDataVolumeConfig() (storageSize string, allowInsecureTLS boo
 	if c.appConfig != nil {
 		// Use type assertion to get config safely
 		if config, ok := c.appConfig.(interface {
-			GetDataVolumeConfig() (string, bool, string, string, string, string)
+			GetDataVolumeConfig() (string, bool, string, string, string, string, string)
 		}); ok {
-			storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage = config.GetDataVolumeConfig()
-			logger.Info("Read DataVolume config from app config: storageSize=%s, allowInsecureTLS=%v, storageClass=%s, vmUpdateTimeout=%s, isoDownloadTimeout=%s, helperImage=%s", storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage)
+			storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage = config.GetDataVolumeConfig()
+			logger.Info("Read DataVolume config from app config: storageSize=%s, allowInsecureTLS=%v, certConfigMap=%s, storageClass=%s, vmUpdateTimeout=%s, isoDownloadTimeout=%s, helperImage=%s", storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage)
 		} else {
 			logger.Info("App config does not implement GetDataVolumeConfig method, using defaults")
 		}
@@ -2800,8 +2802,8 @@ func (c *Client) getDataVolumeConfig() (storageSize string, allowInsecureTLS boo
 		logger.Info("No app config available, using default DataVolume config")
 	}
 
-	logger.Info("Final DataVolume config: storageSize=%s, allowInsecureTLS=%v, storageClass=%s, vmUpdateTimeout=%s, isoDownloadTimeout=%s, helperImage=%s", storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage)
-	return storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage
+	logger.Info("Final DataVolume config: storageSize=%s, allowInsecureTLS=%v, certConfigMap=%s, storageClass=%s, vmUpdateTimeout=%s, isoDownloadTimeout=%s, helperImage=%s", storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage)
+	return storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage
 }
 
 // getStorageProfileVolumeMode queries the CDI StorageProfile for the given storage class
