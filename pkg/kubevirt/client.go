@@ -2028,7 +2028,6 @@ func (c *Client) copyISOToPVC(namespace, dataVolumeName, imageURL, isoDownloadTi
 	}
 
 	pvcName := dataVolumeName
-	isoFileName := filepath.Base(imageURL)
 
 	timestamp := time.Now().Unix()
 	helperPodName := sanitizeResourceName(fmt.Sprintf("copy-iso-%s-%d", dataVolumeName, timestamp))
@@ -2066,7 +2065,7 @@ func (c *Client) copyISOToPVC(namespace, dataVolumeName, imageURL, isoDownloadTi
 				"cpu":    resourceMustParse("50m"),
 			},
 			Limits: corev1.ResourceList{
-				"memory": resourceMustParse("512Mi"),
+				"memory": resourceMustParse("1024Mi"),
 				"cpu":    resourceMustParse("250m"),
 			},
 		},
@@ -2075,15 +2074,15 @@ func (c *Client) copyISOToPVC(namespace, dataVolumeName, imageURL, isoDownloadTi
 	if isBlock {
 		logger.Info("PVC %s uses Block volume mode, helper pod will use dd", pvcName)
 		container.Command = []string{"sh", "-c", fmt.Sprintf(
-			"curl --fail --show-error --insecure --connect-timeout 30 --max-time 1800 --location -o /tmp/%s %s && [ -s /tmp/%s ] && dd if=/tmp/%s of=/dev/block bs=1M conv=fsync",
-			isoFileName, imageURL, isoFileName, isoFileName)}
+			"set -o pipefail; curl --fail --show-error --insecure --connect-timeout 30 --max-time 1800 --location %s | dd of=/dev/block bs=1M oflag=direct conv=fsync",
+			imageURL)}
 		container.VolumeDevices = []corev1.VolumeDevice{
 			{Name: "iso-volume", DevicePath: "/dev/block"},
 		}
 	} else {
 		logger.Info("PVC %s uses Filesystem volume mode, helper pod will download directly", pvcName)
 		container.Command = []string{"sh", "-c", fmt.Sprintf(
-			"curl --fail --show-error --insecure --connect-timeout 30 --max-time 1800 --location -o /mnt/iso/disk.img %s && [ -s /mnt/iso/disk.img ] && sync /mnt/iso/disk.img",
+			"set -o pipefail; curl --fail --show-error --insecure --connect-timeout 30 --max-time 1800 --location %s | dd of=/mnt/iso/disk.img bs=1M oflag=direct conv=fsync",
 			imageURL)}
 		container.VolumeMounts = []corev1.VolumeMount{
 			{Name: "iso-volume", MountPath: "/mnt/iso"},
