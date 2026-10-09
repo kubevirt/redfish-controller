@@ -87,7 +87,7 @@ func (s *Server) serveMemory(w http.ResponseWriter, namespace, vmName, base stri
 		mem := redfish.Memory{
 			OdataContext: "/redfish/v1/$metadata#Memory.Memory",
 			OdataID:      self + "/" + memoryID,
-			OdataType:    "#Memory.v1_0_0.Memory",
+			OdataType:    "#Memory.v1_1_0.Memory",
 			ID:           memoryID,
 			Name:         "System Memory",
 			MemoryType:   "DRAM",
@@ -154,16 +154,16 @@ func (s *Server) serveStorage(w http.ResponseWriter, namespace, vmName, base str
 		return
 	}
 
-	disks, err := s.kubevirtClient.GetVMDisks(namespace, vmName)
-	if err != nil {
-		logger.Error("Failed to get disks for VM %s/%s: %v", namespace, vmName, err)
-		s.sendInternalError(w, "Failed to get storage information")
-		return
-	}
 	member := self + "/" + storageID
 
 	switch {
 	case len(rest) == 2:
+		disks, err := s.kubevirtClient.GetVMDisks(namespace, vmName)
+		if err != nil {
+			logger.Error("Failed to get disks for VM %s/%s: %v", namespace, vmName, err)
+			s.sendInternalError(w, "Failed to get storage information")
+			return
+		}
 		storage := redfish.Storage{
 			OdataContext: "/redfish/v1/$metadata#Storage.Storage",
 			OdataID:      member,
@@ -179,29 +179,32 @@ func (s *Server) serveStorage(w http.ResponseWriter, namespace, vmName, base str
 		}
 		s.writeResource(w, storage)
 	case len(rest) == 4 && rest[2] == "Drives":
-		for _, d := range disks {
-			if d.Name != rest[3] {
-				continue
-			}
-			drive := redfish.Drive{
-				OdataContext:  "/redfish/v1/$metadata#Drive.Drive",
-				OdataID:       member + "/Drives/" + d.Name,
-				OdataType:     "#Drive.v1_0_0.Drive",
-				ID:            d.Name,
-				Name:          d.Name,
-				CapacityBytes: d.CapacityBytes,
-				Status:        okStatus,
-			}
-			if d.CapacityBytes != nil {
-				drive.Oem = oemCapacity(float64(*d.CapacityBytes) / (1 << 30))
-			}
-			if d.Bus == "sata" {
-				drive.Protocol = "SATA"
-			}
-			s.writeResource(w, drive)
+		d, err := s.kubevirtClient.GetVMDisk(namespace, vmName, rest[3])
+		if err != nil {
+			logger.Error("Failed to get disk %s of VM %s/%s: %v", rest[3], namespace, vmName, err)
+			s.sendInternalError(w, "Failed to get storage information")
 			return
 		}
-		s.sendNotFound(w, "Drive not found")
+		if d == nil {
+			s.sendNotFound(w, "Drive not found")
+			return
+		}
+		drive := redfish.Drive{
+			OdataContext:  "/redfish/v1/$metadata#Drive.Drive",
+			OdataID:       member + "/Drives/" + d.Name,
+			OdataType:     "#Drive.v1_0_0.Drive",
+			ID:            d.Name,
+			Name:          d.Name,
+			CapacityBytes: d.CapacityBytes,
+			Status:        okStatus,
+		}
+		if d.CapacityBytes != nil {
+			drive.Oem = oemCapacity(float64(*d.CapacityBytes) / (1 << 30))
+		}
+		if d.Bus == "sata" {
+			drive.Protocol = "SATA"
+		}
+		s.writeResource(w, drive)
 	default:
 		s.sendNotFound(w, "Storage resource not found")
 	}
@@ -235,7 +238,7 @@ func (s *Server) serveEthernetInterfaces(w http.ResponseWriter, namespace, vmNam
 		eth := redfish.EthernetInterface{
 			OdataContext: "/redfish/v1/$metadata#EthernetInterface.EthernetInterface",
 			OdataID:      self + "/" + n.Name,
-			OdataType:    "#EthernetInterface.v1_0_0.EthernetInterface",
+			OdataType:    "#EthernetInterface.v1_1_0.EthernetInterface",
 			ID:           n.Name,
 			Name:         n.Name,
 			MACAddress:   n.MAC,
@@ -246,8 +249,12 @@ func (s *Server) serveEthernetInterfaces(w http.ResponseWriter, namespace, vmNam
 			eth.LinkStatus = "LinkUp"
 		}
 		for _, ip := range n.IPs {
-			if p := net.ParseIP(ip); p != nil && p.To4() != nil {
+			switch p := net.ParseIP(ip); {
+			case p == nil:
+			case p.To4() != nil:
 				eth.IPv4 = append(eth.IPv4, redfish.IPv4Address{Address: ip})
+			default:
+				eth.IPv6 = append(eth.IPv6, redfish.IPv6Address{Address: ip})
 			}
 		}
 		s.writeResource(w, eth)
@@ -268,20 +275,39 @@ func redfishArchitecture(kubevirtArch string) (arch, instructionSet string) {
 	return "", ""
 }
 
+// processorFields reads the vCPU topology of a VM and returns the ProcessorSummary
+// and Oem for the ComputerSystem. If the topology cannot be read both are nil, so
+// they are left out of the response instead of showing a guessed topology.
+func (s *Server) processorFields(namespace, vmName string) (*redfish.ProcessorSummary, *redfish.SystemOem) {
+	cpu, err := s.kubevirtClient.GetVMCPUTopology(namespace, vmName)
+	if err != nil {
+		logger.Error("Failed to get CPU topology for VM %s/%s, leaving it out of the response: %v", namespace, vmName, err)
+		return nil, nil
+	}
+	summary := processorSummary(cpu)
+	return &summary, systemOem(cpu)
+}
+
 // processorSummary maps a VM's vCPU topology to the Redfish ProcessorSummary.
 func processorSummary(cpu kubevirt.CPUTopology) redfish.ProcessorSummary {
-	oem := &redfish.CPUTopologyOem{}
-	oem.KubeVirt.Sockets = cpu.Sockets
-	oem.KubeVirt.CoresPerSocket = cpu.Cores
-	oem.KubeVirt.ThreadsPerCore = cpu.Threads
 	return redfish.ProcessorSummary{
 		Count:                 cpu.Sockets,
 		CoreCount:             cpu.Sockets * cpu.Cores,
 		LogicalProcessorCount: cpu.VCPUs(),
 		ThreadingEnabled:      cpu.Threads > 1,
 		Model:                 cpu.Model,
-		Oem:                   oem,
 	}
+}
+
+// systemOem spells out the vCPU layout that the standard counts are derived
+// from. ProcessorSummary has no Oem property in any schema version, so it
+// lives in the system-level Oem.
+func systemOem(cpu kubevirt.CPUTopology) *redfish.SystemOem {
+	oem := &redfish.SystemOem{}
+	oem.KubeVirt.Processors.Sockets = cpu.Sockets
+	oem.KubeVirt.Processors.CoresPerSocket = cpu.Cores
+	oem.KubeVirt.Processors.ThreadsPerCore = cpu.Threads
+	return oem
 }
 
 func oemCapacity(gib float64) *redfish.OemCapacity {
