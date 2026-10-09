@@ -181,7 +181,7 @@ While your deployment is starting to deploy in the background, you can explore t
    {
      "@odata.context": "/redfish/v1/$metadata#ComputerSystem.ComputerSystem",
      "@odata.id": "/redfish/v1/Systems/ztp-jinkit-kvm-00",
-     "@odata.type": "#ComputerSystem.v1_0_0.ComputerSystem",
+     "@odata.type": "#ComputerSystem.v1_15_0.ComputerSystem",
      "@odata.etag": "W/\"1756160934\"",
      "Id": "ztp-jinkit-kvm-00",
      "Name": "ztp-jinkit-kvm-00",
@@ -191,12 +191,20 @@ While your deployment is starting to deploy in the background, you can explore t
        "Health": "OK"
      },
      "PowerState": "On",
-     "Memory": {
-       "@odata.id": "/redfish/v1/Systems/ztp-jinkit-kvm-00/Memory",
+     "MemorySummary": {
        "TotalSystemMemoryGiB": 48
      },
+     "Memory": {
+       "@odata.id": "/redfish/v1/Systems/ztp-jinkit-kvm-00/Memory"
+     },
+     "Processors": {
+       "@odata.id": "/redfish/v1/Systems/ztp-jinkit-kvm-00/Processors"
+     },
      "ProcessorSummary": {
-       "Count": 20
+       "Count": 1,
+       "CoreCount": 20,
+       "LogicalProcessorCount": 20,
+       "ThreadingEnabled": false
      },
      "Storage": {
        "@odata.id": "/redfish/v1/Systems/ztp-jinkit-kvm-00/Storage"
@@ -237,9 +245,120 @@ While your deployment is starting to deploy in the background, you can explore t
            "@odata.id": "/redfish/v1/Managers/1"
          }
        ]
+     },
+     "Oem": {
+       "KubeVirt": {
+         "Processors": {
+           "Sockets": 1,
+           "CoresPerSocket": 20,
+           "ThreadsPerCore": 1
+         }
+       }
      }
    }
    ```
+
+3. **Review the Hardware of a Managed System**
+
+   A system also exposes its processors, memory, disks and network interfaces. The examples below come from a virtual machine named `my-vm` with 2 sockets, 2 cores per socket, 2 threads per core, 512 MiB of memory, a root disk from a container image and a 3 GiB SATA disk. All of them are read-only and follow the links in the system response.
+
+   **Processors** (one entry per socket, `/Processors/CPU0`, `/Processors/CPU1`):
+
+   ```bash
+   curl -sk -u admin:admin123 https://<redfish-route>/redfish/v1/Systems/my-vm/Processors/CPU0 | jq
+   ```
+
+   ```json
+   {
+     "@odata.context": "/redfish/v1/$metadata#Processor.Processor",
+     "@odata.id": "/redfish/v1/Systems/my-vm/Processors/CPU0",
+     "@odata.type": "#Processor.v1_0_0.Processor",
+     "Id": "CPU0",
+     "Name": "vCPU Socket 0",
+     "Socket": "0",
+     "ProcessorType": "CPU",
+     "ProcessorArchitecture": "x86",
+     "InstructionSet": "x86-64",
+     "TotalCores": 2,
+     "TotalThreads": 4,
+     "Model": "host-model",
+     "Status": {
+       "State": "Enabled",
+       "Health": "OK"
+     }
+   }
+   ```
+
+   **Memory** (a single module, `/Memory/1`). `CapacityMiB` is the standard field and `Oem.KubeVirt.CapacityGiB` repeats it in GiB:
+
+   ```json
+   {
+     "@odata.context": "/redfish/v1/$metadata#Memory.Memory",
+     "@odata.id": "/redfish/v1/Systems/my-vm/Memory/1",
+     "@odata.type": "#Memory.v1_1_0.Memory",
+     "Id": "1",
+     "Name": "System Memory",
+     "MemoryType": "DRAM",
+     "CapacityMiB": 512,
+     "Status": {
+       "State": "Enabled",
+       "Health": "OK"
+     },
+     "Oem": {
+       "KubeVirt": {
+         "CapacityGiB": 0.5
+       }
+     }
+   }
+   ```
+
+   **Disks** (`/Storage/1` lists every disk of the VM, CD-ROMs excluded because they are VirtualMedia; each drive is under `/Storage/1/Drives/{name}`). A disk whose size is not declared in the VM, such as a container image or a cloud-init disk, has no `CapacityBytes`:
+
+   ```json
+   {
+     "@odata.context": "/redfish/v1/$metadata#Drive.Drive",
+     "@odata.id": "/redfish/v1/Systems/my-vm/Storage/1/Drives/scratch",
+     "@odata.type": "#Drive.v1_0_0.Drive",
+     "Id": "scratch",
+     "Name": "scratch",
+     "Protocol": "SATA",
+     "CapacityBytes": 3221225472,
+     "Status": {
+       "State": "Enabled",
+       "Health": "OK"
+     },
+     "Oem": {
+       "KubeVirt": {
+         "CapacityGiB": 3
+       }
+     }
+   }
+   ```
+
+   **Network interfaces** (`/EthernetInterfaces` lists every NIC). `LinkStatus` is `LinkUp` while the VM is running and `NoLink` otherwise. The MAC address comes from the running VM, or from the VM definition when it is stopped, and is omitted if neither has one. Virtual NICs have no link speed, so `SpeedMbps` is not reported:
+
+   ```json
+   {
+     "@odata.context": "/redfish/v1/$metadata#EthernetInterface.EthernetInterface",
+     "@odata.id": "/redfish/v1/Systems/my-vm/EthernetInterfaces/default",
+     "@odata.type": "#EthernetInterface.v1_1_0.EthernetInterface",
+     "Id": "default",
+     "Name": "default",
+     "MACAddress": "02:11:22:33:44:55",
+     "LinkStatus": "LinkUp",
+     "IPv4Addresses": [
+       {
+         "Address": "10.128.2.164"
+       }
+     ],
+     "Status": {
+       "State": "Enabled",
+       "Health": "OK"
+     }
+   }
+   ```
+
+   `ProcessorSummary` follows the Redfish definitions: `Count` is the number of sockets, `CoreCount` is sockets x cores and `LogicalProcessorCount` is sockets x cores x threads. The processor `Model` is the CPU model configured on the VM (for example `host-model`) and is omitted when the VM does not set one.
 
 ## Environment Cleanup
 
