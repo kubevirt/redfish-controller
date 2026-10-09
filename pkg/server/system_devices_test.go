@@ -39,13 +39,14 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 )
 
-func newDevicesTestServer(t *testing.T) *Server {
+func newDevicesTestServer(t *testing.T, arch string) *Server {
 	t.Helper()
 	mock := kubevirt.NewMockDynamicClient()
 	vm := &kubevirtv1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{Name: "vm-1", Namespace: "ns"},
 		Spec: kubevirtv1.VirtualMachineSpec{Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
 			Spec: kubevirtv1.VirtualMachineInstanceSpec{
+				Architecture: arch,
 				Domain: kubevirtv1.DomainSpec{
 					CPU: &kubevirtv1.CPU{Cores: 2, Sockets: 2, Threads: 2, Model: "Skylake-Client"},
 					Resources: kubevirtv1.ResourceRequirements{
@@ -91,7 +92,7 @@ func getSystemPath(srv *Server, path string) *httptest.ResponseRecorder {
 }
 
 func TestSystemDevices(t *testing.T) {
-	srv := newDevicesTestServer(t)
+	srv := newDevicesTestServer(t, "")
 
 	get := func(t *testing.T, path string) map[string]interface{} {
 		t.Helper()
@@ -136,8 +137,8 @@ func TestSystemDevices(t *testing.T) {
 		assert.EqualValues(t, 2, p["TotalCores"])
 		assert.EqualValues(t, 4, p["TotalThreads"])
 		assert.Equal(t, "Skylake-Client", p["Model"])
-		assert.Equal(t, "x86", p["ProcessorArchitecture"], "unset architecture defaults to amd64")
-		assert.Equal(t, "x86-64", p["InstructionSet"])
+		assert.NotContains(t, p, "ProcessorArchitecture", "VM declares no architecture, so none is guessed")
+		assert.NotContains(t, p, "InstructionSet")
 	})
 
 	t.Run("storage lists every disk with its capacity", func(t *testing.T) {
@@ -195,5 +196,28 @@ func TestRedfishArchitecture(t *testing.T) {
 	} {
 		arch, isa := redfishArchitecture(in)
 		assert.Equal(t, want, [2]string{arch, isa}, in)
+	}
+}
+
+func TestProcessorArchitecture(t *testing.T) {
+	for _, tc := range []struct{ arch, wantArch, wantISA string }{
+		{"amd64", "x86", "x86-64"},
+		{"arm64", "ARM", "ARM-A64"},
+		{"s390x", "", ""},
+	} {
+		t.Run(tc.arch, func(t *testing.T) {
+			srv := newDevicesTestServer(t, tc.arch)
+			w := getSystemPath(srv, "/redfish/v1/Systems/vm-1/Processors/CPU0")
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			var p map[string]interface{}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &p))
+			if tc.wantArch == "" {
+				assert.NotContains(t, p, "ProcessorArchitecture")
+				assert.NotContains(t, p, "InstructionSet")
+				return
+			}
+			assert.Equal(t, tc.wantArch, p["ProcessorArchitecture"])
+			assert.Equal(t, tc.wantISA, p["InstructionSet"])
+		})
 	}
 }
