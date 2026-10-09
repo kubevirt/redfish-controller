@@ -136,6 +136,8 @@ func TestSystemDevices(t *testing.T) {
 		assert.EqualValues(t, 2, p["TotalCores"])
 		assert.EqualValues(t, 4, p["TotalThreads"])
 		assert.Equal(t, "Skylake-Client", p["Model"])
+		assert.Equal(t, "x86", p["ProcessorArchitecture"], "unset architecture defaults to amd64")
+		assert.Equal(t, "x86-64", p["InstructionSet"])
 	})
 
 	t.Run("storage lists every disk with its capacity", func(t *testing.T) {
@@ -182,4 +184,16 @@ func TestSystemDevices(t *testing.T) {
 		srv.handleSystem(w, req)
 		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
 	})
+}
+
+func TestRedfishArchitecture(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"amd64":   {"x86", "x86-64"},
+		"arm64":   {"ARM", "ARM-A64"},
+		"s390x":   {"", ""},
+		"ppc64le": {"", ""},
+	} {
+		arch, isa := redfishArchitecture(in)
+		assert.Equal(t, want, [2]string{arch, isa}, in)
+	}
 }

@@ -125,18 +125,21 @@ func (s *Server) serveProcessors(w http.ResponseWriter, namespace, vmName, base 
 		s.sendNotFound(w, "Processor not found")
 		return
 	}
+	arch, isa := redfishArchitecture(cpu.Architecture)
 	s.writeResource(w, redfish.Processor{
-		OdataContext:  "/redfish/v1/$metadata#Processor.Processor",
-		OdataID:       fmt.Sprintf("%s/CPU%d", self, socket),
-		OdataType:     "#Processor.v1_0_0.Processor",
-		ID:            rest[1],
-		Name:          fmt.Sprintf("vCPU Socket %d", socket),
-		Socket:        fmt.Sprint(socket),
-		ProcessorType: "CPU",
-		TotalCores:    cpu.Cores,
-		TotalThreads:  cpu.Cores * cpu.Threads,
-		Model:         cpu.Model,
-		Status:        okStatus,
+		OdataContext:          "/redfish/v1/$metadata#Processor.Processor",
+		OdataID:               fmt.Sprintf("%s/CPU%d", self, socket),
+		OdataType:             "#Processor.v1_0_0.Processor",
+		ID:                    rest[1],
+		Name:                  fmt.Sprintf("vCPU Socket %d", socket),
+		Socket:                fmt.Sprint(socket),
+		ProcessorType:         "CPU",
+		ProcessorArchitecture: arch,
+		InstructionSet:        isa,
+		TotalCores:            cpu.Cores,
+		TotalThreads:          cpu.Cores * cpu.Threads,
+		Model:                 cpu.Model,
+		Status:                okStatus,
 	})
 }
 
@@ -251,6 +254,18 @@ func (s *Server) serveEthernetInterfaces(w http.ResponseWriter, namespace, vmNam
 		return
 	}
 	s.sendNotFound(w, "Ethernet interface not found")
+}
+
+// redfishArchitecture maps a KubeVirt architecture to the Redfish
+// ProcessorArchitecture and InstructionSet values. Unknown architectures map to "".
+func redfishArchitecture(kubevirtArch string) (arch, instructionSet string) {
+	switch kubevirtArch {
+	case "amd64":
+		return "x86", "x86-64"
+	case "arm64":
+		return "ARM", "ARM-A64"
+	}
+	return "", ""
 }
 
 // processorSummary maps a VM's vCPU topology to the Redfish ProcessorSummary.
