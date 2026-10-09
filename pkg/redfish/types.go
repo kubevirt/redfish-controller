@@ -90,25 +90,26 @@ type ComputerSystemCollection struct {
 // This is the main resource type for representing KubeVirt VMs in the Redfish API.
 // It includes power state, status, memory information, CPU details, and available actions.
 type ComputerSystem struct {
-	OdataContext       string           `json:"@odata.context"`
-	OdataID            string           `json:"@odata.id"`
-	OdataType          string           `json:"@odata.type"`
-	OdataEtag          string           `json:"@odata.etag,omitempty"`
-	ID                 string           `json:"Id"`
-	Name               string           `json:"Name"`
-	SystemType         string           `json:"SystemType"`
-	Status             Status           `json:"Status"`
-	PowerState         string           `json:"PowerState"`
-	MemorySummary      MemorySummary    `json:"MemorySummary"`
-	Memory             Link             `json:"Memory"`
-	Processors         Link             `json:"Processors"`
-	ProcessorSummary   ProcessorSummary `json:"ProcessorSummary"`
-	Storage            Link             `json:"Storage"`
-	EthernetInterfaces Link             `json:"EthernetInterfaces"`
-	VirtualMedia       Link             `json:"VirtualMedia"`
-	Boot               Boot             `json:"Boot"`
-	Actions            Actions          `json:"Actions"`
-	Links              SystemLinks      `json:"Links"`
+	OdataContext       string            `json:"@odata.context"`
+	OdataID            string            `json:"@odata.id"`
+	OdataType          string            `json:"@odata.type"`
+	OdataEtag          string            `json:"@odata.etag,omitempty"`
+	ID                 string            `json:"Id"`
+	Name               string            `json:"Name"`
+	SystemType         string            `json:"SystemType"`
+	Status             Status            `json:"Status"`
+	PowerState         string            `json:"PowerState"`
+	MemorySummary      MemorySummary     `json:"MemorySummary"`
+	Memory             Link              `json:"Memory"`
+	Processors         Link              `json:"Processors"`
+	ProcessorSummary   *ProcessorSummary `json:"ProcessorSummary,omitempty"`
+	Storage            Link              `json:"Storage"`
+	EthernetInterfaces Link              `json:"EthernetInterfaces"`
+	VirtualMedia       Link              `json:"VirtualMedia"`
+	Boot               Boot              `json:"Boot"`
+	Actions            Actions           `json:"Actions"`
+	Links              SystemLinks       `json:"Links"`
+	Oem                *SystemOem        `json:"Oem,omitempty"`
 }
 
 // Status represents the status of a Redfish resource.
@@ -135,16 +136,17 @@ type ProcessorSummary struct {
 	LogicalProcessorCount int  `json:"LogicalProcessorCount"`
 	ThreadingEnabled      bool `json:"ThreadingEnabled"`
 	// Model is the configured virtual CPU model; omitted when the VM leaves it to the cluster default.
-	Model string          `json:"Model,omitempty"`
-	Oem   *CPUTopologyOem `json:"Oem,omitempty"`
+	Model string `json:"Model,omitempty"`
 }
 
-// CPUTopologyOem spells out the vCPU layout the standard counts are derived from.
-type CPUTopologyOem struct {
+// SystemOem carries vendor extensions of a ComputerSystem.
+type SystemOem struct {
 	KubeVirt struct {
-		Sockets        int `json:"Sockets"`
-		CoresPerSocket int `json:"CoresPerSocket"`
-		ThreadsPerCore int `json:"ThreadsPerCore"`
+		Processors struct {
+			Sockets        int `json:"Sockets"`
+			CoresPerSocket int `json:"CoresPerSocket"`
+			ThreadsPerCore int `json:"ThreadsPerCore"`
+		} `json:"Processors"`
 	} `json:"KubeVirt"`
 }
 
@@ -430,7 +432,6 @@ type Drive struct {
 	ID            string       `json:"Id"`
 	Name          string       `json:"Name"`
 	Protocol      string       `json:"Protocol,omitempty"`
-	MediaType     string       `json:"MediaType,omitempty"`
 	CapacityBytes *int64       `json:"CapacityBytes,omitempty"`
 	Status        Status       `json:"Status"`
 	Oem           *OemCapacity `json:"Oem,omitempty"`
@@ -455,11 +456,16 @@ type EthernetInterface struct {
 	OdataType    string        `json:"@odata.type"`
 	ID           string        `json:"Id"`
 	Name         string        `json:"Name"`
-	Description  string        `json:"Description,omitempty"`
 	MACAddress   string        `json:"MACAddress,omitempty"`
 	LinkStatus   string        `json:"LinkStatus,omitempty"`
 	IPv4         []IPv4Address `json:"IPv4Addresses,omitempty"`
+	IPv6         []IPv6Address `json:"IPv6Addresses,omitempty"`
 	Status       Status        `json:"Status"`
+}
+
+// IPv6Address is one IPv6 address of an EthernetInterface.
+type IPv6Address struct {
+	Address string `json:"Address"`
 }
 
 // IPv4Address is one IPv4 address of an EthernetInterface.

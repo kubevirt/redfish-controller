@@ -21,9 +21,11 @@ package kubevirt
 
 import (
 	"context"
+	"fmt"
 	"math"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 )
@@ -33,7 +35,7 @@ type VMDisk struct {
 	Name string
 	Bus  string
 	// CapacityBytes is nil when the spec does not declare a size
-	// (containerDisk, cloudInit, ...).
+	// (containerDisk, cloudInit, ...) and always nil from GetVMDisks.
 	CapacityBytes *int64
 }
 
@@ -56,23 +58,18 @@ func (c *Client) VMMemoryMiB(namespace, name string) (int64, error) {
 	return int64(math.Round(gib * 1024)), nil
 }
 
-// GetVMDisks returns every disk of a VM in spec order. CD-ROM devices are
-// excluded because they are exposed as VirtualMedia.
-func (c *Client) GetVMDisks(namespace, name string) ([]VMDisk, error) {
-	vm, err := c.GetVM(namespace, name)
-	if err != nil {
-		return nil, err
-	}
+// vmDisks lists the disks of a VM in spec order together with their backing
+// volume (nil when the spec has none). CD-ROM devices are excluded because
+// they are exposed as VirtualMedia. It makes no API calls.
+func vmDisks(vm *kubevirtv1.VirtualMachine) (disks []VMDisk, volumes []*kubevirtv1.Volume) {
 	if vm.Spec.Template == nil {
 		return nil, nil
 	}
-
-	volumes := map[string]kubevirtv1.Volume{}
-	for _, v := range vm.Spec.Template.Spec.Volumes {
-		volumes[v.Name] = v
+	byName := map[string]*kubevirtv1.Volume{}
+	for i := range vm.Spec.Template.Spec.Volumes {
+		v := &vm.Spec.Template.Spec.Volumes[i]
+		byName[v.Name] = v
 	}
-
-	var disks []VMDisk
 	for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
 		if d.CDRom != nil {
 			continue
@@ -84,16 +81,53 @@ func (c *Client) GetVMDisks(namespace, name string) ([]VMDisk, error) {
 		case d.LUN != nil:
 			disk.Bus = string(d.LUN.Bus)
 		}
-		if vol, ok := volumes[d.Name]; ok {
-			disk.CapacityBytes = c.volumeCapacityBytes(namespace, vm, vol)
-		}
 		disks = append(disks, disk)
+		volumes = append(volumes, byName[d.Name])
 	}
+	return disks, volumes
+}
+
+// GetVMDisks returns the disks of a VM in spec order with name and bus only.
+// CapacityBytes is left unset on purpose: resolving a size can cost an API
+// call per disk, so use GetVMDisk when the size of one disk is needed.
+func (c *Client) GetVMDisks(namespace, name string) ([]VMDisk, error) {
+	vm, err := c.GetVM(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	disks, _ := vmDisks(vm)
 	return disks, nil
 }
 
-// volumeCapacityBytes resolves the declared size of a volume, or nil if unknown.
-func (c *Client) volumeCapacityBytes(namespace string, vm *kubevirtv1.VirtualMachine, vol kubevirtv1.Volume) *int64 {
+// GetVMDisk returns one disk of a VM including its capacity, or nil if the VM
+// has no such disk. Only that disk's size is looked up.
+func (c *Client) GetVMDisk(namespace, name, disk string) (*VMDisk, error) {
+	vm, err := c.GetVM(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	disks, volumes := vmDisks(vm)
+	for i := range disks {
+		if disks[i].Name != disk {
+			continue
+		}
+		if volumes[i] != nil {
+			capacity, err := c.volumeCapacityBytes(namespace, vm, *volumes[i])
+			if err != nil {
+				return nil, err
+			}
+			disks[i].CapacityBytes = capacity
+		}
+		return &disks[i], nil
+	}
+	return nil, nil
+}
+
+// volumeCapacityBytes resolves the declared size of a volume, or nil if it has
+// none. A PVC that does not exist yet falls back to the DataVolume template;
+// any other failure to read the PVC (forbidden, timeout, ...) is returned so
+// the caller does not report a size that may be wrong.
+func (c *Client) volumeCapacityBytes(namespace string, vm *kubevirtv1.VirtualMachine, vol kubevirtv1.Volume) (*int64, error) {
 	var claim string
 	switch {
 	case vol.PersistentVolumeClaim != nil:
@@ -103,16 +137,19 @@ func (c *Client) volumeCapacityBytes(namespace string, vm *kubevirtv1.VirtualMac
 	case vol.Ephemeral != nil && vol.Ephemeral.PersistentVolumeClaim != nil:
 		claim = vol.Ephemeral.PersistentVolumeClaim.ClaimName
 	case vol.EmptyDisk != nil:
+		if vol.EmptyDisk.Capacity.IsZero() {
+			return nil, nil
+		}
 		b := vol.EmptyDisk.Capacity.Value()
-		return &b
+		return &b, nil
 	case vol.HostDisk != nil:
 		if vol.HostDisk.Capacity.IsZero() {
-			return nil
+			return nil, nil
 		}
 		b := vol.HostDisk.Capacity.Value()
-		return &b
+		return &b, nil
 	default:
-		return nil
+		return nil, nil
 	}
 
 	// Prefer the real PVC (actual provisioned size), fall back to the DataVolume template.
@@ -120,15 +157,18 @@ func (c *Client) volumeCapacityBytes(namespace string, vm *kubevirtv1.VirtualMac
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 		defer cancel()
 		pvc, err := c.kubernetesClient.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, claim, metav1.GetOptions{})
-		if err == nil {
+		switch {
+		case err == nil:
 			if q, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
 				b := q.Value()
-				return &b
+				return &b, nil
 			}
 			if q, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
 				b := q.Value()
-				return &b
+				return &b, nil
 			}
+		case !apierrors.IsNotFound(err):
+			return nil, fmt.Errorf("failed to get PVC %s/%s: %w", namespace, claim, err)
 		}
 	}
 	for _, dv := range vm.Spec.DataVolumeTemplates {
@@ -138,17 +178,17 @@ func (c *Client) volumeCapacityBytes(namespace string, vm *kubevirtv1.VirtualMac
 		if dv.Spec.Storage != nil {
 			if q, ok := dv.Spec.Storage.Resources.Requests[corev1.ResourceStorage]; ok {
 				b := q.Value()
-				return &b
+				return &b, nil
 			}
 		}
 		if dv.Spec.PVC != nil {
 			if q, ok := dv.Spec.PVC.Resources.Requests[corev1.ResourceStorage]; ok {
 				b := q.Value()
-				return &b
+				return &b, nil
 			}
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // GetVMNICs returns every network interface of a VM. The MAC and IPs come
@@ -162,11 +202,17 @@ func (c *Client) GetVMNICs(namespace, name string) ([]VMNIC, error) {
 		return nil, nil
 	}
 
+	// No VMI means the VM is not running. Any other failure is returned: reporting
+	// NoLink for a running VM whose VMI could not be read would be wrong.
 	status := map[string]kubevirtv1.VirtualMachineInstanceNetworkInterface{}
-	if vmi, err := c.GetVMI(namespace, name); err == nil {
+	vmi, err := c.GetVMI(namespace, name)
+	switch {
+	case err == nil:
 		for _, s := range vmi.Status.Interfaces {
 			status[s.Name] = s
 		}
+	case !apierrors.IsNotFound(err):
+		return nil, err
 	}
 
 	var nics []VMNIC
