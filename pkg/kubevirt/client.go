@@ -2592,6 +2592,9 @@ type CPUTopology struct {
 	// Model is domain.cpu.model as configured (e.g. "host-model", "Skylake-Client");
 	// empty when the VM leaves it to the cluster default.
 	Model string
+	// Architecture is spec.architecture ("amd64", "arm64"); an unset value is
+	// reported as "amd64", the KubeVirt default.
+	Architecture string
 }
 
 // VCPUs returns the total number of vCPUs (sockets x cores x threads).
@@ -2601,19 +2604,25 @@ func (t CPUTopology) VCPUs() int { return t.Sockets * t.Cores * t.Threads }
 func (c *Client) GetVMCPUTopology(namespace, name string) (CPUTopology, error) {
 	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
-		return CPUTopology{Sockets: 1, Cores: 1, Threads: 1}, fmt.Errorf("failed to get VM %s/%s for CPU lookup: %w", namespace, name, err)
+		return CPUTopology{Sockets: 1, Cores: 1, Threads: 1, Architecture: "amd64"}, fmt.Errorf("failed to get VM %s/%s for CPU lookup: %w", namespace, name, err)
 	}
-	if vm.Spec.Template == nil || vm.Spec.Template.Spec.Domain.CPU == nil {
-		logger.Warning("CPU not found in VM spec for %s/%s, using 1 vCPU", namespace, name)
-		return CPUTopology{Sockets: 1, Cores: 1, Threads: 1}, nil
+	topo := CPUTopology{Sockets: 1, Cores: 1, Threads: 1, Architecture: "amd64"}
+	if vm.Spec.Template == nil {
+		return topo, nil
+	}
+	if arch := vm.Spec.Template.Spec.Architecture; arch != "" {
+		topo.Architecture = arch
 	}
 	cpu := vm.Spec.Template.Spec.Domain.CPU
-	return CPUTopology{
-		Sockets: int(max(cpu.Sockets, 1)),
-		Cores:   int(max(cpu.Cores, 1)),
-		Threads: int(max(cpu.Threads, 1)),
-		Model:   cpu.Model,
-	}, nil
+	if cpu == nil {
+		logger.Warning("CPU not found in VM spec for %s/%s, using 1 vCPU", namespace, name)
+		return topo, nil
+	}
+	topo.Sockets = int(max(cpu.Sockets, 1))
+	topo.Cores = int(max(cpu.Cores, 1))
+	topo.Threads = int(max(cpu.Threads, 1))
+	topo.Model = cpu.Model
+	return topo, nil
 }
 
 // GetVMCPU gets the total vCPU count of a VirtualMachine (sockets x cores x threads).

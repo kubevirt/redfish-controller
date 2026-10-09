@@ -477,8 +477,13 @@ type Processor struct {
 	Name          string `json:"Name"`
 	Socket        string `json:"Socket"`
 	ProcessorType string `json:"ProcessorType"`
-	TotalCores    int    `json:"TotalCores"`
-	TotalThreads  int    `json:"TotalThreads"`
-	Model         string `json:"Model,omitempty"`
-	Status        Status `json:"Status"`
+	// ProcessorArchitecture is the Redfish family ("x86", "ARM") and
+	// InstructionSet the specific set ("x86-64", "ARM-A64"); both are omitted
+	// for architectures without a mapping.
+	ProcessorArchitecture string `json:"ProcessorArchitecture,omitempty"`
+	InstructionSet        string `json:"InstructionSet,omitempty"`
+	TotalCores            int    `json:"TotalCores"`
+	TotalThreads          int    `json:"TotalThreads"`
+	Model                 string `json:"Model,omitempty"`
+	Status                Status `json:"Status"`
 }

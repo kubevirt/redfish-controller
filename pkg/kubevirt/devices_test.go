@@ -76,8 +76,11 @@ func TestGetVMCPUTopology(t *testing.T) {
 	}
 	c := NewClientWithClients(fake.NewSimpleClientset(), mock, 30*time.Second, nil)
 	got, err := c.GetVMCPUTopology("ns", "vm")
-	if err != nil || got != (CPUTopology{Sockets: 2, Cores: 4, Threads: 2, Model: "host-model"}) || got.VCPUs() != 16 {
+	if err != nil || got != (CPUTopology{Sockets: 2, Cores: 4, Threads: 2, Model: "host-model", Architecture: "amd64"}) || got.VCPUs() != 16 {
 		t.Errorf("topology = %+v, %v", got, err)
+	}
+	if got.Architecture != "amd64" {
+		t.Errorf("unset architecture = %q, want the amd64 default", got.Architecture)
 	}
 	if _, err := c.GetVMCPUTopology("ns", "nope"); err == nil {
 		t.Error("expected an error for a missing VM")
@@ -245,4 +248,16 @@ func TestGetVMNICs(t *testing.T) {
 			t.Errorf("fixed has no status entry, must not be running: %+v", nics[1])
 		}
 	})
+}
+
+func TestGetVMCPUTopology_Architecture(t *testing.T) {
+	mock := NewMockDynamicClient()
+	if err := mock.AddVM(deviceTestVM(kubevirtv1.VirtualMachineInstanceSpec{Architecture: "arm64"})); err != nil {
+		t.Fatal(err)
+	}
+	c := NewClientWithClients(fake.NewSimpleClientset(), mock, 30*time.Second, nil)
+	got, err := c.GetVMCPUTopology("ns", "vm")
+	if err != nil || got.Architecture != "arm64" {
+		t.Errorf("architecture = %q, %v; want arm64", got.Architecture, err)
+	}
 }
