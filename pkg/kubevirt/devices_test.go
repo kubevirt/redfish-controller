@@ -76,11 +76,11 @@ func TestGetVMCPUTopology(t *testing.T) {
 	}
 	c := NewClientWithClients(fake.NewSimpleClientset(), mock, 30*time.Second, nil)
 	got, err := c.GetVMCPUTopology("ns", "vm")
-	if err != nil || got != (CPUTopology{Sockets: 2, Cores: 4, Threads: 2, Model: "host-model", Architecture: "amd64"}) || got.VCPUs() != 16 {
+	if err != nil || got != (CPUTopology{Sockets: 2, Cores: 4, Threads: 2, Model: "host-model"}) || got.VCPUs() != 16 {
 		t.Errorf("topology = %+v, %v", got, err)
 	}
-	if got.Architecture != "amd64" {
-		t.Errorf("unset architecture = %q, want the amd64 default", got.Architecture)
+	if got.Architecture != "" {
+		t.Errorf("unset architecture = %q, want it left empty, not guessed", got.Architecture)
 	}
 	if _, err := c.GetVMCPUTopology("ns", "nope"); err == nil {
 		t.Error("expected an error for a missing VM")

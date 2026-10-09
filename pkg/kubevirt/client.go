@@ -2592,8 +2592,8 @@ type CPUTopology struct {
 	// Model is domain.cpu.model as configured (e.g. "host-model", "Skylake-Client");
 	// empty when the VM leaves it to the cluster default.
 	Model string
-	// Architecture is spec.architecture ("amd64", "arm64"); an unset value is
-	// reported as "amd64", the KubeVirt default.
+	// Architecture is spec.architecture ("amd64", "arm64"). It is empty when the
+	// VM does not declare one (KubeVirt normally fills it in on creation).
 	Architecture string
 }
 
@@ -2604,15 +2604,13 @@ func (t CPUTopology) VCPUs() int { return t.Sockets * t.Cores * t.Threads }
 func (c *Client) GetVMCPUTopology(namespace, name string) (CPUTopology, error) {
 	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
-		return CPUTopology{Sockets: 1, Cores: 1, Threads: 1, Architecture: "amd64"}, fmt.Errorf("failed to get VM %s/%s for CPU lookup: %w", namespace, name, err)
+		return CPUTopology{Sockets: 1, Cores: 1, Threads: 1}, fmt.Errorf("failed to get VM %s/%s for CPU lookup: %w", namespace, name, err)
 	}
-	topo := CPUTopology{Sockets: 1, Cores: 1, Threads: 1, Architecture: "amd64"}
+	topo := CPUTopology{Sockets: 1, Cores: 1, Threads: 1}
 	if vm.Spec.Template == nil {
 		return topo, nil
 	}
-	if arch := vm.Spec.Template.Spec.Architecture; arch != "" {
-		topo.Architecture = arch
-	}
+	topo.Architecture = vm.Spec.Template.Spec.Architecture
 	cpu := vm.Spec.Template.Spec.Domain.CPU
 	if cpu == nil {
 		logger.Warning("CPU not found in VM spec for %s/%s, using 1 vCPU", namespace, name)
