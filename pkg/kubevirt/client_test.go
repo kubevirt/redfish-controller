@@ -1605,7 +1605,7 @@ func TestGetVMMemory(t *testing.T) {
 				}
 				mockClient.AddVM(vm)
 			},
-			expected: 2.0, // Default fallback
+			expected: 0, // Unknown: no invented default
 		},
 	}
 
@@ -1688,7 +1688,7 @@ func TestGetVMCPU(t *testing.T) {
 				}
 				mockClient.AddVM(vm)
 			},
-			expected: 8,
+			expected: 16, // sockets x cores
 		},
 		{
 			name: "VM without CPU spec",
@@ -1731,7 +1731,7 @@ func TestGetVMCPU(t *testing.T) {
 			}
 
 			if result != tc.expected {
-				t.Errorf("Expected %d CPU cores, got %d", tc.expected, result)
+				t.Errorf("Expected %d vCPUs, got %d", tc.expected, result)
 			}
 		})
 	}
