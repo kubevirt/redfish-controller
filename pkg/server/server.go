@@ -650,6 +650,16 @@ func (s *Server) handleSystemsCollection(w http.ResponseWriter, r *http.Request)
 	s.encodeJSONResponse(w, collection)
 }
 
+// isResetActionPath reports whether pathParts (the split request path) is
+// exactly /redfish/v1/Systems/{id}/Actions/ComputerSystem.Reset, with an
+// optional trailing slash.
+func isResetActionPath(pathParts []string) bool {
+	if len(pathParts) == 8 && pathParts[7] == "" {
+		pathParts = pathParts[:7]
+	}
+	return len(pathParts) == 7 && pathParts[5] == "Actions" && pathParts[6] == "ComputerSystem.Reset"
+}
+
 // handleSystem handles individual system (VM) endpoints.
 // It returns detailed information about a specific virtual machine.
 //
@@ -675,8 +685,20 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	logger.LogSafeHeaders("System request headers", r.Header, logger.GetCorrelationID(r.Context()))
 
 	// Handle power management actions
-	if r.Method == "POST" && strings.Contains(r.URL.Path, "/Actions/ComputerSystem.Reset") {
+	// Only the system's own action path counts: a Contains check would also match
+	// "/Systems/{id}/Memory/1/Actions/ComputerSystem.Reset" and power-cycle the VM
+	// from a read-only resource instead of answering 405.
+	if r.Method == "POST" && isResetActionPath(pathParts) {
 		s.handlePowerAction(w, r, systemName)
+		return
+	}
+
+	// Hardware sub-resources: Memory, Processors, Storage, EthernetInterfaces.
+	// This must come before the PATCH branch below, which takes every PATCH
+	// whatever its path: otherwise a PATCH to a read-only resource is treated as
+	// a boot update instead of being answered with 405.
+	if len(pathParts) >= 6 && (pathParts[5] == "Memory" || pathParts[5] == "Processors" || pathParts[5] == "Storage" || pathParts[5] == "EthernetInterfaces") {
+		s.handleSystemDevices(w, r, systemName, pathParts)
 		return
 	}
 
@@ -689,12 +711,6 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	// Check if this is a virtual media request
 	if len(pathParts) >= 6 && pathParts[5] == "VirtualMedia" {
 		s.handleVirtualMediaRequest(w, r, systemName, pathParts)
-		return
-	}
-
-	// Hardware sub-resources: Memory, Processors, Storage, EthernetInterfaces
-	if len(pathParts) >= 6 && (pathParts[5] == "Memory" || pathParts[5] == "Processors" || pathParts[5] == "Storage" || pathParts[5] == "EthernetInterfaces") {
-		s.handleSystemDevices(w, r, systemName, pathParts)
 		return
 	}
 
