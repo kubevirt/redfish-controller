@@ -2552,28 +2552,40 @@ func (c *Client) GetNamespaceInfo(namespace string) (*corev1.Namespace, error) {
 }
 
 // GetVMMemory gets the memory of a VirtualMachine in GiB.
-// It reads domain.memory.guest, then resources.requests.memory, then
-// resources.limits.memory. It returns 0 when the spec declares none, so
-// callers can tell "unknown" apart from a real size.
+// A running VM reports what its VMI has now (status.memory.guestCurrent, then
+// the VMI spec), so memory hotplug and staged-but-not-applied VM edits do not
+// show up early. A stopped VM (no VMI) reports its VM spec.
+// Within a spec it reads domain.memory.guest, then resources.requests.memory,
+// then resources.limits.memory. It returns 0 when none is declared, so callers
+// can tell "unknown" apart from a real size.
 func (c *Client) GetVMMemory(namespace, name string) (float64, error) {
 	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get VM %s/%s for memory lookup: %w", namespace, name, err)
 	}
+	vmi, err := c.getRunningVMI(namespace, name)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get VMI %s/%s for memory lookup: %w", namespace, name, err)
+	}
 
-	bytes := vmMemoryBytes(vm)
+	var bytes int64
+	switch {
+	case vmi != nil && vmi.Status.Memory != nil && vmi.Status.Memory.GuestCurrent != nil:
+		bytes = vmi.Status.Memory.GuestCurrent.Value()
+	case vmi != nil:
+		bytes = specMemoryBytes(&vmi.Spec)
+	case vm.Spec.Template != nil:
+		bytes = specMemoryBytes(&vm.Spec.Template.Spec)
+	}
 	if bytes == 0 {
-		logger.Warning("Memory not declared in VM spec for %s/%s", namespace, name)
+		logger.Warning("Memory not declared for %s/%s", namespace, name)
 	}
 	return float64(bytes) / (1 << 30), nil
 }
 
-// vmMemoryBytes returns the VM memory in bytes, or 0 when the spec declares none.
-func vmMemoryBytes(vm *kubevirtv1.VirtualMachine) int64 {
-	if vm.Spec.Template == nil {
-		return 0
-	}
-	domain := vm.Spec.Template.Spec.Domain
+// specMemoryBytes returns the memory a spec declares in bytes, or 0 when it declares none.
+func specMemoryBytes(spec *kubevirtv1.VirtualMachineInstanceSpec) int64 {
+	domain := spec.Domain
 	if domain.Memory != nil && domain.Memory.Guest != nil {
 		return domain.Memory.Guest.Value()
 	}
@@ -2592,8 +2604,8 @@ type CPUTopology struct {
 	// Model is domain.cpu.model as configured (e.g. "host-model", "Skylake-Client");
 	// empty when the VM leaves it to the cluster default.
 	Model string
-	// Architecture is spec.architecture ("amd64", "arm64"). It is empty when the
-	// VM does not declare one (KubeVirt normally fills it in on creation).
+	// Architecture is spec.architecture ("amd64", "arm64"). It is empty when
+	// neither the VMI nor the VM declares one.
 	Architecture string
 }
 
@@ -2601,26 +2613,49 @@ type CPUTopology struct {
 func (t CPUTopology) VCPUs() int { return t.Sockets * t.Cores * t.Threads }
 
 // GetVMCPUTopology returns the sockets, cores per socket and threads per core of a VM.
+// A running VM reports what its VMI has now (status.currentCPUTopology, then the
+// VMI spec); a stopped VM (no VMI) reports its VM spec.
 // On error it returns the zero value, never a guessed topology.
 func (c *Client) GetVMCPUTopology(namespace, name string) (CPUTopology, error) {
 	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		return CPUTopology{}, fmt.Errorf("failed to get VM %s/%s for CPU lookup: %w", namespace, name, err)
 	}
+	vmi, err := c.getRunningVMI(namespace, name)
+	if err != nil {
+		return CPUTopology{}, fmt.Errorf("failed to get VMI %s/%s for CPU lookup: %w", namespace, name, err)
+	}
+
 	topo := CPUTopology{Sockets: 1, Cores: 1, Threads: 1}
-	if vm.Spec.Template == nil {
+	var spec *kubevirtv1.VirtualMachineInstanceSpec
+	switch {
+	case vmi != nil:
+		spec = &vmi.Spec
+	case vm.Spec.Template != nil:
+		spec = &vm.Spec.Template.Spec
+	default:
 		return topo, nil
 	}
-	topo.Architecture = vm.Spec.Template.Spec.Architecture
-	cpu := vm.Spec.Template.Spec.Domain.CPU
+
+	topo.Architecture = spec.Architecture
+	if topo.Architecture == "" && vm.Spec.Template != nil {
+		topo.Architecture = vm.Spec.Template.Spec.Architecture
+	}
+	cpu := spec.Domain.CPU
 	if cpu == nil {
-		logger.Warning("CPU not found in VM spec for %s/%s, using 1 vCPU", namespace, name)
-		return topo, nil
+		logger.Warning("CPU not found in spec for %s/%s, using 1 vCPU", namespace, name)
+	} else {
+		topo.Sockets = int(max(cpu.Sockets, 1))
+		topo.Cores = int(max(cpu.Cores, 1))
+		topo.Threads = int(max(cpu.Threads, 1))
+		topo.Model = cpu.Model
 	}
-	topo.Sockets = int(max(cpu.Sockets, 1))
-	topo.Cores = int(max(cpu.Cores, 1))
-	topo.Threads = int(max(cpu.Threads, 1))
-	topo.Model = cpu.Model
+	if vmi != nil && vmi.Status.CurrentCPUTopology != nil {
+		cur := vmi.Status.CurrentCPUTopology
+		topo.Sockets = int(max(cur.Sockets, 1))
+		topo.Cores = int(max(cur.Cores, 1))
+		topo.Threads = int(max(cur.Threads, 1))
+	}
 	return topo, nil
 }
 

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2025 KubeVirt Redfish project and its authors.
+ * Copyright 2026 KubeVirt Redfish project and its authors.
  *
  */
 
@@ -315,6 +315,7 @@ func TestGetVMNICs(t *testing.T) {
 		}
 		vmi := &kubevirtv1.VirtualMachineInstance{
 			ObjectMeta: metav1.ObjectMeta{Name: "vm", Namespace: "ns"},
+			Spec:       spec,
 			Status: kubevirtv1.VirtualMachineInstanceStatus{Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{
 				{Name: "default", MAC: "52:54:00:aa:bb:cc", IPs: []string{"10.0.0.5", "fd00::5"}},
 			}},
@@ -345,6 +346,272 @@ func TestGetVMCPUTopology_Architecture(t *testing.T) {
 	got, err := c.GetVMCPUTopology("ns", "vm")
 	if err != nil || got.Architecture != "arm64" {
 		t.Errorf("architecture = %q, %v; want arm64", got.Architecture, err)
+	}
+}
+
+// deviceTestVMI is a running VMI named like deviceTestVM.
+func deviceTestVMI(spec kubevirtv1.VirtualMachineInstanceSpec, status kubevirtv1.VirtualMachineInstanceStatus) *kubevirtv1.VirtualMachineInstance {
+	return &kubevirtv1.VirtualMachineInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "vm", Namespace: "ns"},
+		Spec:       spec,
+		Status:     status,
+	}
+}
+
+// The VM spec holds the staged values; a running VM must report its VMI instead,
+// and a stopped VM (no VMI) must report the VM spec.
+func TestGetVMCPUTopology_VMIWinsOverVM(t *testing.T) {
+	vmSpec := kubevirtv1.VirtualMachineInstanceSpec{
+		Architecture: "amd64",
+		Domain:       kubevirtv1.DomainSpec{CPU: &kubevirtv1.CPU{Sockets: 8, Cores: 8, Threads: 2, Model: "staged-model"}},
+	}
+	vmiSpec := kubevirtv1.VirtualMachineInstanceSpec{
+		Architecture: "arm64",
+		Domain:       kubevirtv1.DomainSpec{CPU: &kubevirtv1.CPU{Sockets: 2, Cores: 2, Threads: 1, Model: "running-model"}},
+	}
+	cases := []struct {
+		name string
+		vmi  *kubevirtv1.VirtualMachineInstance
+		want CPUTopology
+	}{
+		{"stopped VM uses the VM spec", nil,
+			CPUTopology{Sockets: 8, Cores: 8, Threads: 2, Model: "staged-model", Architecture: "amd64"}},
+		{"running VM uses the VMI spec", deviceTestVMI(vmiSpec, kubevirtv1.VirtualMachineInstanceStatus{}),
+			CPUTopology{Sockets: 2, Cores: 2, Threads: 1, Model: "running-model", Architecture: "arm64"}},
+		{"hotplug in progress uses status.currentCPUTopology",
+			deviceTestVMI(vmiSpec, kubevirtv1.VirtualMachineInstanceStatus{
+				CurrentCPUTopology: &kubevirtv1.CPUTopology{Sockets: 1, Cores: 2, Threads: 1}}),
+			CPUTopology{Sockets: 1, Cores: 2, Threads: 1, Model: "running-model", Architecture: "arm64"}},
+		{"VMI without architecture falls back to the VM's",
+			deviceTestVMI(kubevirtv1.VirtualMachineInstanceSpec{Domain: vmiSpec.Domain}, kubevirtv1.VirtualMachineInstanceStatus{}),
+			CPUTopology{Sockets: 2, Cores: 2, Threads: 1, Model: "running-model", Architecture: "amd64"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := NewMockDynamicClient()
+			if err := mock.AddVM(deviceTestVM(vmSpec)); err != nil {
+				t.Fatal(err)
+			}
+			if tc.vmi != nil {
+				if err := mock.AddVMI(tc.vmi); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := NewClientWithClients(fake.NewSimpleClientset(), mock, 30*time.Second, nil)
+			got, err := c.GetVMCPUTopology("ns", "vm")
+			if err != nil || got != tc.want {
+				t.Errorf("topology = %+v, %v; want %+v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetVMMemory_VMIWinsOverVM(t *testing.T) {
+	staged := resource.MustParse("8Gi")
+	running := resource.MustParse("2Gi")
+	current := resource.MustParse("3Gi")
+	vmSpec := kubevirtv1.VirtualMachineInstanceSpec{Domain: kubevirtv1.DomainSpec{Memory: &kubevirtv1.Memory{Guest: &staged}}}
+	vmiSpec := kubevirtv1.VirtualMachineInstanceSpec{Domain: kubevirtv1.DomainSpec{Memory: &kubevirtv1.Memory{Guest: &running}}}
+	cases := []struct {
+		name string
+		vmi  *kubevirtv1.VirtualMachineInstance
+		want float64
+	}{
+		{"stopped VM uses the VM spec", nil, 8},
+		{"running VM uses the VMI spec", deviceTestVMI(vmiSpec, kubevirtv1.VirtualMachineInstanceStatus{}), 2},
+		{"hotplug in progress uses status.memory.guestCurrent",
+			deviceTestVMI(vmiSpec, kubevirtv1.VirtualMachineInstanceStatus{Memory: &kubevirtv1.MemoryStatus{GuestCurrent: &current}}), 3},
+		{"status.memory without guestCurrent falls back to the VMI spec",
+			deviceTestVMI(vmiSpec, kubevirtv1.VirtualMachineInstanceStatus{Memory: &kubevirtv1.MemoryStatus{}}), 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := NewMockDynamicClient()
+			if err := mock.AddVM(deviceTestVM(vmSpec)); err != nil {
+				t.Fatal(err)
+			}
+			if tc.vmi != nil {
+				if err := mock.AddVMI(tc.vmi); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := NewClientWithClients(fake.NewSimpleClientset(), mock, 30*time.Second, nil)
+			got, err := c.GetVMMemory("ns", "vm")
+			if err != nil || got != tc.want {
+				t.Errorf("memory = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// A VMI that cannot be read (not "not found") must fail the lookup, not fall
+// back to the staged VM spec.
+func TestGetVMCPUAndMemory_VMIReadErrorsAreNotHidden(t *testing.T) {
+	mock := NewMockDynamicClient()
+	if err := mock.AddVM(deviceTestVM(kubevirtv1.VirtualMachineInstanceSpec{})); err != nil {
+		t.Fatal(err)
+	}
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "virtualmachineinstances"}, "vm", errors.New("no access"))
+	c := NewClientWithClients(fake.NewSimpleClientset(), failingVMIs{Interface: mock, err: forbidden}, 30*time.Second, nil)
+	if topo, err := c.GetVMCPUTopology("ns", "vm"); err == nil || topo != (CPUTopology{}) {
+		t.Errorf("CPU: got %+v, %v; want the zero topology and an error", topo, err)
+	}
+	if _, err := c.GetVMMemory("ns", "vm"); err == nil {
+		t.Error("memory: expected an error")
+	}
+	if _, err := c.GetVMDisks("ns", "vm"); err == nil {
+		t.Error("disks: expected an error")
+	}
+	if _, err := c.GetVMDisk("ns", "vm", "root"); err == nil {
+		t.Error("disk: expected an error")
+	}
+	if _, err := c.GetVMNICs("ns", "vm"); err == nil {
+		t.Error("NICs: expected an error")
+	}
+}
+
+func newDeviceClient(t *testing.T, vm *kubevirtv1.VirtualMachine, vmi *kubevirtv1.VirtualMachineInstance) *Client {
+	t.Helper()
+	mock := NewMockDynamicClient()
+	if err := mock.AddVM(vm); err != nil {
+		t.Fatal(err)
+	}
+	if vmi != nil {
+		if err := mock.AddVMI(vmi); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return NewClientWithClients(fake.NewSimpleClientset(), mock, 30*time.Second, nil)
+}
+
+// status.currentCPUTopology wins field by field, not only for sockets.
+func TestGetVMCPUTopology_StatusTopologyWinsOverSpec(t *testing.T) {
+	spec := kubevirtv1.VirtualMachineInstanceSpec{Domain: kubevirtv1.DomainSpec{CPU: &kubevirtv1.CPU{Sockets: 1, Cores: 1, Threads: 1}}}
+	vmi := deviceTestVMI(spec, kubevirtv1.VirtualMachineInstanceStatus{
+		CurrentCPUTopology: &kubevirtv1.CPUTopology{Sockets: 2, Cores: 3, Threads: 2}})
+	got, err := newDeviceClient(t, deviceTestVM(spec), vmi).GetVMCPUTopology("ns", "vm")
+	if err != nil || got.Sockets != 2 || got.Cores != 3 || got.Threads != 2 || got.VCPUs() != 12 {
+		t.Errorf("topology = %+v, %v; want 2x3x2", got, err)
+	}
+
+	// An unset field in the status counts as 1, like in the spec.
+	vmi = deviceTestVMI(spec, kubevirtv1.VirtualMachineInstanceStatus{
+		CurrentCPUTopology: &kubevirtv1.CPUTopology{Sockets: 2}})
+	got, err = newDeviceClient(t, deviceTestVM(spec), vmi).GetVMCPUTopology("ns", "vm")
+	if err != nil || got.Sockets != 2 || got.Cores != 1 || got.Threads != 1 {
+		t.Errorf("topology = %+v, %v; want 2x1x1", got, err)
+	}
+}
+
+// A VMI in a final phase can outlive the guest. The VM is stopped then, so every
+// lookup must read the VM spec, not the dead VMI.
+func TestFinishedVMIReadsTheVMSpec(t *testing.T) {
+	vmMem, vmiMem := resource.MustParse("8Gi"), resource.MustParse("1Gi")
+	vmSpec := kubevirtv1.VirtualMachineInstanceSpec{
+		Architecture: "amd64",
+		Domain: kubevirtv1.DomainSpec{
+			CPU:    &kubevirtv1.CPU{Sockets: 4, Cores: 2, Threads: 1},
+			Memory: &kubevirtv1.Memory{Guest: &vmMem},
+			Devices: kubevirtv1.Devices{
+				Disks:      []kubevirtv1.Disk{{Name: "staged", DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: "virtio"}}}},
+				Interfaces: []kubevirtv1.Interface{{Name: "staged-nic", MacAddress: "02:00:00:00:00:99"}},
+			},
+		},
+	}
+	vmiSpec := kubevirtv1.VirtualMachineInstanceSpec{
+		Architecture: "arm64",
+		Domain: kubevirtv1.DomainSpec{
+			CPU:    &kubevirtv1.CPU{Sockets: 1, Cores: 1, Threads: 1},
+			Memory: &kubevirtv1.Memory{Guest: &vmiMem},
+			Devices: kubevirtv1.Devices{
+				Disks:      []kubevirtv1.Disk{{Name: "old", DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: "virtio"}}}},
+				Interfaces: []kubevirtv1.Interface{{Name: "old-nic"}},
+			},
+		},
+	}
+	for _, phase := range []kubevirtv1.VirtualMachineInstancePhase{kubevirtv1.Succeeded, kubevirtv1.Failed} {
+		t.Run(string(phase), func(t *testing.T) {
+			vmi := deviceTestVMI(vmiSpec, kubevirtv1.VirtualMachineInstanceStatus{
+				Phase:              phase,
+				CurrentCPUTopology: &kubevirtv1.CPUTopology{Sockets: 1, Cores: 1, Threads: 1},
+				Interfaces:         []kubevirtv1.VirtualMachineInstanceNetworkInterface{{Name: "old-nic", MAC: "52:54:00:00:00:01", IPs: []string{"10.0.0.9"}}},
+			})
+			c := newDeviceClient(t, deviceTestVM(vmSpec), vmi)
+
+			if topo, err := c.GetVMCPUTopology("ns", "vm"); err != nil || topo.Sockets != 4 || topo.Cores != 2 || topo.Architecture != "amd64" {
+				t.Errorf("CPU = %+v, %v; want the VM spec", topo, err)
+			}
+			if gib, err := c.GetVMMemory("ns", "vm"); err != nil || gib != 8 {
+				t.Errorf("memory = %v, %v; want 8", gib, err)
+			}
+			if disks, err := c.GetVMDisks("ns", "vm"); err != nil || len(disks) != 1 || disks[0].Name != "staged" {
+				t.Errorf("disks = %+v, %v; want the VM's", disks, err)
+			}
+			nics, err := c.GetVMNICs("ns", "vm")
+			if err != nil || len(nics) != 1 || nics[0].Name != "staged-nic" || nics[0].Running || len(nics[0].IPs) != 0 || nics[0].MAC != "02:00:00:00:00:99" {
+				t.Errorf("NICs = %+v, %v; want the VM's, not running", nics, err)
+			}
+		})
+	}
+}
+
+// A running VM lists the disks and NICs of its VMI, not the staged VM spec.
+func TestGetVMDisksAndNICs_VMIWinsOverVM(t *testing.T) {
+	disk := func(n string) kubevirtv1.Disk {
+		return kubevirtv1.Disk{Name: n, DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: "virtio"}}}
+	}
+	vmSpec := kubevirtv1.VirtualMachineInstanceSpec{Domain: kubevirtv1.DomainSpec{Devices: kubevirtv1.Devices{
+		Disks:      []kubevirtv1.Disk{disk("root"), disk("staged-only")},
+		Interfaces: []kubevirtv1.Interface{{Name: "default"}, {Name: "staged-nic"}},
+	}}}
+	vmiSpec := kubevirtv1.VirtualMachineInstanceSpec{
+		Domain: kubevirtv1.DomainSpec{Devices: kubevirtv1.Devices{
+			Disks:      []kubevirtv1.Disk{disk("root"), disk("hotplugged")},
+			Interfaces: []kubevirtv1.Interface{{Name: "default"}},
+		}},
+		Volumes: []kubevirtv1.Volume{{Name: "hotplugged", VolumeSource: kubevirtv1.VolumeSource{
+			EmptyDisk: &kubevirtv1.EmptyDiskSource{Capacity: resource.MustParse("1Gi")}}}},
+	}
+	c := newDeviceClient(t, deviceTestVM(vmSpec), deviceTestVMI(vmiSpec, kubevirtv1.VirtualMachineInstanceStatus{Phase: kubevirtv1.Running}))
+
+	disks, err := c.GetVMDisks("ns", "vm")
+	if err != nil || len(disks) != 2 || disks[0].Name != "root" || disks[1].Name != "hotplugged" {
+		t.Errorf("disks = %+v, %v; want root and hotplugged (the VMI's)", disks, err)
+	}
+	if d, err := c.GetVMDisk("ns", "vm", "hotplugged"); err != nil || d == nil || d.CapacityBytes == nil || *d.CapacityBytes != 1<<30 {
+		t.Errorf("hotplugged disk = %+v, %v; want 1Gi", d, err)
+	}
+	if d, err := c.GetVMDisk("ns", "vm", "staged-only"); err != nil || d != nil {
+		t.Errorf("staged-only disk = %+v, %v; want nil (not attached yet)", d, err)
+	}
+	if nics, err := c.GetVMNICs("ns", "vm"); err != nil || len(nics) != 1 || nics[0].Name != "default" {
+		t.Errorf("NICs = %+v, %v; want only default", nics, err)
+	}
+}
+
+func TestGetVMNICs_LinkState(t *testing.T) {
+	spec := kubevirtv1.VirtualMachineInstanceSpec{Domain: kubevirtv1.DomainSpec{Devices: kubevirtv1.Devices{
+		Interfaces: []kubevirtv1.Interface{{Name: "up"}, {Name: "down"}, {Name: "unreported"}},
+	}}}
+	vmi := deviceTestVMI(spec, kubevirtv1.VirtualMachineInstanceStatus{Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{Name: "up", LinkState: "up"}, {Name: "down", LinkState: "down"}, {Name: "unreported"},
+	}})
+	nics, err := newDeviceClient(t, deviceTestVM(spec), vmi).GetVMNICs("ns", "vm")
+	if err != nil || len(nics) != 3 {
+		t.Fatalf("NICs = %+v, %v", nics, err)
+	}
+	for i, want := range []string{"up", "down", ""} {
+		if !nics[i].Running || nics[i].LinkState != want {
+			t.Errorf("%s: %+v; want running with link state %q", nics[i].Name, nics[i], want)
+		}
+	}
+}
+
+func TestVMMemoryMiB_Rounds(t *testing.T) {
+	q := resource.MustParse("1000000000") // 953.67 MiB
+	spec := kubevirtv1.VirtualMachineInstanceSpec{Domain: kubevirtv1.DomainSpec{Memory: &kubevirtv1.Memory{Guest: &q}}}
+	if mib, err := newDeviceClient(t, deviceTestVM(spec), nil).VMMemoryMiB("ns", "vm"); err != nil || mib != 954 {
+		t.Errorf("VMMemoryMiB = %d, %v; want 954", mib, err)
 	}
 }
 

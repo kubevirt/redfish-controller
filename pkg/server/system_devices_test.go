@@ -350,6 +350,8 @@ func TestSystemDevices_Unauthorized(t *testing.T) {
 func TestSystemDevices_RunningNIC(t *testing.T) {
 	vmi := &kubevirtv1.VirtualMachineInstance{
 		ObjectMeta: metav1.ObjectMeta{Name: "vm-1", Namespace: "ns"},
+		Spec: kubevirtv1.VirtualMachineInstanceSpec{Domain: kubevirtv1.DomainSpec{Devices: kubevirtv1.Devices{
+			Interfaces: []kubevirtv1.Interface{{Name: "default"}}}}},
 		Status: kubevirtv1.VirtualMachineInstanceStatus{Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{
 			{Name: "default", MAC: "52:54:00:aa:bb:cc", IPs: []string{"10.0.0.5", "fd00::5", "not-an-ip", "10.0.0.6"}},
 		}},
