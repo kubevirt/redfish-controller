@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2025 KubeVirt Redfish project and its authors.
+ * Copyright 2026 KubeVirt Redfish project and its authors.
  *
  */
 
@@ -43,7 +43,9 @@ var okStatus = redfish.Status{State: "Enabled", Health: "OK"}
 
 // handleSystemDevices serves the read-only hardware sub-resources of a system:
 // Memory, Processors, Storage (with Drives) and EthernetInterfaces. pathParts is the split
-// request path, so pathParts[5] is the sub-resource name.
+// request path. For "/redfish/v1/Systems/vm-1/Storage/1/Drives/root" that is
+// ["", "redfish", "v1", "Systems", "vm-1", "Storage", "1", "Drives", "root"], so
+// pathParts[5:] starts at the sub-resource name ("Storage").
 func (s *Server) handleSystemDevices(w http.ResponseWriter, r *http.Request, systemName string, pathParts []string) {
 	if !s.validateMethod(w, r, []string{"GET"}) {
 		return
@@ -53,7 +55,8 @@ func (s *Server) handleSystemDevices(w http.ResponseWriter, r *http.Request, sys
 		return
 	}
 
-	// Drop a trailing empty element ("/Storage/" -> "/Storage").
+	// Drop a trailing empty element: "/redfish/v1/Systems/vm-1/Storage/" splits
+	// into [... "Storage", ""], which must be handled like "/Storage".
 	rest := pathParts[5:]
 	if rest[len(rest)-1] == "" {
 		rest = rest[:len(rest)-1]
@@ -245,7 +248,9 @@ func (s *Server) serveEthernetInterfaces(w http.ResponseWriter, namespace, vmNam
 			LinkStatus:   "NoLink",
 			Status:       okStatus,
 		}
-		if n.Running {
+		// A reported "down" is a disconnected virtual NIC on a running VM; an empty
+		// state (not reported) on a running NIC is treated as up.
+		if n.Running && n.LinkState != "down" {
 			eth.LinkStatus = "LinkUp"
 		}
 		for _, ip := range n.IPs {

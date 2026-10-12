@@ -262,6 +262,8 @@ While your deployment is starting to deploy in the background, you can explore t
 
    A system also exposes its processors, memory, disks and network interfaces. The examples below come from a virtual machine named `my-vm` with 2 sockets, 2 cores per socket, 2 threads per core, 512 MiB of memory, a root disk from a container image and a 3 GiB SATA disk. All of them are read-only and follow the links in the system response.
 
+   While the VM is running, the values describe what the running VM has now (its VirtualMachineInstance), so a CPU or memory change that is not applied yet, or a disk or network interface that is not attached yet, does not show up early. While the VM is stopped, or when its last run has finished, they come from the VM definition.
+
    **Processors** (one entry per socket, `/Processors/CPU0`, `/Processors/CPU1`):
 
    ```bash
@@ -335,7 +337,7 @@ While your deployment is starting to deploy in the background, you can explore t
    }
    ```
 
-   **Network interfaces** (`/EthernetInterfaces` lists every NIC). `LinkStatus` is `LinkUp` while the VM is running and `NoLink` otherwise. The MAC address comes from the running VM, or from the VM definition when it is stopped, and is omitted if neither has one. Virtual NICs have no link speed, so `SpeedMbps` is not reported:
+   **Network interfaces** (`/EthernetInterfaces` lists every NIC). `LinkStatus` is `LinkUp` while the VM is running and `NoLink` when it is stopped or when KubeVirt reports the interface link as down. The MAC address comes from the running VM, or from the VM definition when it is stopped, and is omitted if neither has one. Virtual NICs have no link speed, so `SpeedMbps` is not reported:
 
    ```json
    {
