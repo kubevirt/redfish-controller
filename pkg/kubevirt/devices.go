@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2025 KubeVirt Redfish project and its authors.
+ * Copyright 2026 KubeVirt Redfish project and its authors.
  *
  */
 
@@ -47,6 +47,9 @@ type VMNIC struct {
 	IPs []string
 	// Running is true when the VMI exists and reports this interface.
 	Running bool
+	// LinkState is the operational link state the VMI reports ("up" or "down").
+	// It is empty when the VMI does not report one (older KubeVirt, or not running).
+	LinkState string
 }
 
 // VMMemoryMiB returns the VM memory in MiB (see GetVMMemory for the source order).
@@ -58,19 +61,49 @@ func (c *Client) VMMemoryMiB(namespace, name string) (int64, error) {
 	return int64(math.Round(gib * 1024)), nil
 }
 
-// vmDisks lists the disks of a VM in spec order together with their backing
+// getRunningVMI returns the VMI of a VM, or nil when the VM is not running: either
+// there is no VMI, or it is in a final phase (Succeeded/Failed), which KubeVirt
+// can leave behind after a shutdown. Any other failure is returned: treating it
+// as "stopped" would show the staged VM spec for a VM that is running.
+func (c *Client) getRunningVMI(namespace, name string) (*kubevirtv1.VirtualMachineInstance, error) {
+	vmi, err := c.GetVMI(namespace, name)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if vmi.IsFinal() {
+		return nil, nil
+	}
+	return vmi, nil
+}
+
+// effectiveSpec returns the spec that describes what the VM is now: the running
+// VMI's when there is one, otherwise the VM template's (nil if it has none).
+func effectiveSpec(vm *kubevirtv1.VirtualMachine, vmi *kubevirtv1.VirtualMachineInstance) *kubevirtv1.VirtualMachineInstanceSpec {
+	if vmi != nil {
+		return &vmi.Spec
+	}
+	if vm.Spec.Template != nil {
+		return &vm.Spec.Template.Spec
+	}
+	return nil
+}
+
+// vmDisks lists the disks of a spec in order together with their backing
 // volume (nil when the spec has none). CD-ROM devices are excluded because
 // they are exposed as VirtualMedia. It makes no API calls.
-func vmDisks(vm *kubevirtv1.VirtualMachine) (disks []VMDisk, volumes []*kubevirtv1.Volume) {
-	if vm.Spec.Template == nil {
+func vmDisks(spec *kubevirtv1.VirtualMachineInstanceSpec) (disks []VMDisk, volumes []*kubevirtv1.Volume) {
+	if spec == nil {
 		return nil, nil
 	}
 	byName := map[string]*kubevirtv1.Volume{}
-	for i := range vm.Spec.Template.Spec.Volumes {
-		v := &vm.Spec.Template.Spec.Volumes[i]
+	for i := range spec.Volumes {
+		v := &spec.Volumes[i]
 		byName[v.Name] = v
 	}
-	for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
+	for _, d := range spec.Domain.Devices.Disks {
 		if d.CDRom != nil {
 			continue
 		}
@@ -88,6 +121,9 @@ func vmDisks(vm *kubevirtv1.VirtualMachine) (disks []VMDisk, volumes []*kubevirt
 }
 
 // GetVMDisks returns the disks of a VM in spec order with name and bus only.
+// A running VM reports the disks its VMI has (so a volume hot-plugged without
+// --persist is listed and one only staged in the VM spec is not); a stopped VM
+// reports its VM spec.
 // CapacityBytes is left unset on purpose: resolving a size can cost an API
 // call per disk, so use GetVMDisk when the size of one disk is needed.
 func (c *Client) GetVMDisks(namespace, name string) ([]VMDisk, error) {
@@ -95,18 +131,27 @@ func (c *Client) GetVMDisks(namespace, name string) ([]VMDisk, error) {
 	if err != nil {
 		return nil, err
 	}
-	disks, _ := vmDisks(vm)
+	vmi, err := c.getRunningVMI(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	disks, _ := vmDisks(effectiveSpec(vm, vmi))
 	return disks, nil
 }
 
 // GetVMDisk returns one disk of a VM including its capacity, or nil if the VM
-// has no such disk. Only that disk's size is looked up.
+// has no such disk. Only that disk's size is looked up. The disk list follows
+// the same VMI-first rule as GetVMDisks.
 func (c *Client) GetVMDisk(namespace, name, disk string) (*VMDisk, error) {
 	vm, err := c.GetVM(namespace, name)
 	if err != nil {
 		return nil, err
 	}
-	disks, volumes := vmDisks(vm)
+	vmi, err := c.getRunningVMI(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	disks, volumes := vmDisks(effectiveSpec(vm, vmi))
 	for i := range disks {
 		if disks[i].Name != disk {
 			continue
@@ -191,32 +236,34 @@ func (c *Client) volumeCapacityBytes(namespace string, vm *kubevirtv1.VirtualMac
 	return nil, nil
 }
 
-// GetVMNICs returns every network interface of a VM. The MAC and IPs come
-// from the running VMI when available, otherwise from the VM spec.
+// GetVMNICs returns every network interface of a VM. A running VM reports the
+// interfaces its VMI has, with the MAC, IPs and link state the VMI reports; a
+// stopped VM (no VMI, or a finished one) reports its VM spec.
 func (c *Client) GetVMNICs(namespace, name string) ([]VMNIC, error) {
 	vm, err := c.GetVM(namespace, name)
 	if err != nil {
 		return nil, err
 	}
-	if vm.Spec.Template == nil {
+	// Only "no VMI" means the VM is not running. Any other failure is returned:
+	// reporting NoLink for a running VM whose VMI could not be read would be wrong.
+	vmi, err := c.getRunningVMI(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	spec := effectiveSpec(vm, vmi)
+	if spec == nil {
 		return nil, nil
 	}
 
-	// No VMI means the VM is not running. Any other failure is returned: reporting
-	// NoLink for a running VM whose VMI could not be read would be wrong.
 	status := map[string]kubevirtv1.VirtualMachineInstanceNetworkInterface{}
-	vmi, err := c.GetVMI(namespace, name)
-	switch {
-	case err == nil:
+	if vmi != nil {
 		for _, s := range vmi.Status.Interfaces {
 			status[s.Name] = s
 		}
-	case !apierrors.IsNotFound(err):
-		return nil, err
 	}
 
 	var nics []VMNIC
-	for _, i := range vm.Spec.Template.Spec.Domain.Devices.Interfaces {
+	for _, i := range spec.Domain.Devices.Interfaces {
 		nic := VMNIC{Name: i.Name, MAC: i.MacAddress}
 		if s, ok := status[i.Name]; ok {
 			nic.Running = true
@@ -224,6 +271,7 @@ func (c *Client) GetVMNICs(namespace, name string) ([]VMNIC, error) {
 				nic.MAC = s.MAC
 			}
 			nic.IPs = s.IPs
+			nic.LinkState = s.LinkState
 		}
 		nics = append(nics, nic)
 	}
