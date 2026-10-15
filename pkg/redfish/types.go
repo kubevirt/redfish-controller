@@ -90,23 +90,26 @@ type ComputerSystemCollection struct {
 // This is the main resource type for representing KubeVirt VMs in the Redfish API.
 // It includes power state, status, memory information, CPU details, and available actions.
 type ComputerSystem struct {
-	OdataContext       string           `json:"@odata.context"`
-	OdataID            string           `json:"@odata.id"`
-	OdataType          string           `json:"@odata.type"`
-	OdataEtag          string           `json:"@odata.etag,omitempty"`
-	ID                 string           `json:"Id"`
-	Name               string           `json:"Name"`
-	SystemType         string           `json:"SystemType"`
-	Status             Status           `json:"Status"`
-	PowerState         string           `json:"PowerState"`
-	Memory             MemorySummary    `json:"Memory"`
-	ProcessorSummary   ProcessorSummary `json:"ProcessorSummary"`
-	Storage            Link             `json:"Storage"`
-	EthernetInterfaces Link             `json:"EthernetInterfaces"`
-	VirtualMedia       Link             `json:"VirtualMedia"`
-	Boot               Boot             `json:"Boot"`
-	Actions            Actions          `json:"Actions"`
-	Links              SystemLinks      `json:"Links"`
+	OdataContext       string            `json:"@odata.context"`
+	OdataID            string            `json:"@odata.id"`
+	OdataType          string            `json:"@odata.type"`
+	OdataEtag          string            `json:"@odata.etag,omitempty"`
+	ID                 string            `json:"Id"`
+	Name               string            `json:"Name"`
+	SystemType         string            `json:"SystemType"`
+	Status             Status            `json:"Status"`
+	PowerState         string            `json:"PowerState"`
+	MemorySummary      MemorySummary     `json:"MemorySummary"`
+	Memory             Link              `json:"Memory"`
+	Processors         Link              `json:"Processors"`
+	ProcessorSummary   *ProcessorSummary `json:"ProcessorSummary,omitempty"`
+	Storage            Link              `json:"Storage"`
+	EthernetInterfaces Link              `json:"EthernetInterfaces"`
+	VirtualMedia       Link              `json:"VirtualMedia"`
+	Boot               Boot              `json:"Boot"`
+	Actions            Actions           `json:"Actions"`
+	Links              SystemLinks       `json:"Links"`
+	Oem                *SystemOem        `json:"Oem,omitempty"`
 }
 
 // Status represents the status of a Redfish resource.
@@ -118,15 +121,33 @@ type Status struct {
 
 // MemorySummary represents memory information for a computer system.
 // It provides details about the total system memory available to the VM.
+// TotalSystemMemoryGiB is omitted when the VM spec declares no memory.
 type MemorySummary struct {
-	OdataID              string  `json:"@odata.id"`
-	TotalSystemMemoryGiB float64 `json:"TotalSystemMemoryGiB"`
+	TotalSystemMemoryGiB float64 `json:"TotalSystemMemoryGiB,omitempty"`
 }
 
 // ProcessorSummary represents processor information for a computer system.
-// It provides details about the CPU configuration of the VM.
+// Count is the number of sockets, CoreCount is sockets x cores and
+// LogicalProcessorCount is sockets x cores x threads (the vCPU count).
+// The per-socket detail is served under Processors.
 type ProcessorSummary struct {
-	Count int `json:"Count"`
+	Count                 int  `json:"Count"`
+	CoreCount             int  `json:"CoreCount"`
+	LogicalProcessorCount int  `json:"LogicalProcessorCount"`
+	ThreadingEnabled      bool `json:"ThreadingEnabled"`
+	// Model is the configured virtual CPU model; omitted when the VM leaves it to the cluster default.
+	Model string `json:"Model,omitempty"`
+}
+
+// SystemOem carries vendor extensions of a ComputerSystem.
+type SystemOem struct {
+	KubeVirt struct {
+		Processors struct {
+			Sockets        int `json:"Sockets"`
+			CoresPerSocket int `json:"CoresPerSocket"`
+			ThreadsPerCore int `json:"ThreadsPerCore"`
+		} `json:"Processors"`
+	} `json:"KubeVirt"`
 }
 
 // Boot represents boot configuration for a computer system.
@@ -354,3 +375,109 @@ const (
 	ErrorCodeResourceNotFound       = "Base.1.0.ResourceNotFound"
 	ErrorCodePropertyMissing        = "Base.1.0.PropertyMissing"
 )
+
+// ResourceCollection is a generic Redfish collection of linked members.
+type ResourceCollection struct {
+	OdataContext string `json:"@odata.context"`
+	OdataID      string `json:"@odata.id"`
+	OdataType    string `json:"@odata.type"`
+	Name         string `json:"Name"`
+	Members      []Link `json:"Members"`
+	MembersCount int    `json:"Members@odata.count"`
+}
+
+// Memory represents the guest memory of a VM as a single memory module.
+type Memory struct {
+	OdataContext string       `json:"@odata.context"`
+	OdataID      string       `json:"@odata.id"`
+	OdataType    string       `json:"@odata.type"`
+	ID           string       `json:"Id"`
+	Name         string       `json:"Name"`
+	MemoryType   string       `json:"MemoryType"`
+	CapacityMiB  int64        `json:"CapacityMiB,omitempty"`
+	Status       Status       `json:"Status"`
+	Oem          *OemCapacity `json:"Oem,omitempty"`
+}
+
+// Storage represents the storage controller that holds a VM's disks.
+type Storage struct {
+	OdataContext string `json:"@odata.context"`
+	OdataID      string `json:"@odata.id"`
+	OdataType    string `json:"@odata.type"`
+	ID           string `json:"Id"`
+	Name         string `json:"Name"`
+	Status       Status `json:"Status"`
+	Drives       []Link `json:"Drives"`
+	DrivesCount  int    `json:"Drives@odata.count"`
+}
+
+// Drive represents one disk attached to a VM.
+// CapacityBytes is omitted when the size is not declared (e.g. containerDisk).
+type Drive struct {
+	OdataContext  string       `json:"@odata.context"`
+	OdataID       string       `json:"@odata.id"`
+	OdataType     string       `json:"@odata.type"`
+	ID            string       `json:"Id"`
+	Name          string       `json:"Name"`
+	Protocol      string       `json:"Protocol,omitempty"`
+	CapacityBytes *int64       `json:"CapacityBytes,omitempty"`
+	Status        Status       `json:"Status"`
+	Oem           *OemCapacity `json:"Oem,omitempty"`
+}
+
+// OemCapacity carries a human-readable GiB copy of a capacity. The standard
+// Redfish Drive and Memory schemas only define CapacityBytes and CapacityMiB,
+// which clients such as Ironic read, so the GiB value lives under Oem.KubeVirt.
+type OemCapacity struct {
+	KubeVirt struct {
+		CapacityGiB float64 `json:"CapacityGiB"`
+	} `json:"KubeVirt"`
+}
+
+// EthernetInterface represents one network interface of a VM.
+// LinkStatus is LinkUp while the VM runs and NoLink otherwise.
+// MACAddress is omitted when KubeVirt has not assigned one yet (VM never started).
+// SpeedMbps is always omitted: virtual NICs have no link speed.
+type EthernetInterface struct {
+	OdataContext string        `json:"@odata.context"`
+	OdataID      string        `json:"@odata.id"`
+	OdataType    string        `json:"@odata.type"`
+	ID           string        `json:"Id"`
+	Name         string        `json:"Name"`
+	MACAddress   string        `json:"MACAddress,omitempty"`
+	LinkStatus   string        `json:"LinkStatus,omitempty"`
+	IPv4         []IPv4Address `json:"IPv4Addresses,omitempty"`
+	IPv6         []IPv6Address `json:"IPv6Addresses,omitempty"`
+	Status       Status        `json:"Status"`
+}
+
+// IPv6Address is one IPv6 address of an EthernetInterface.
+type IPv6Address struct {
+	Address string `json:"Address"`
+}
+
+// IPv4Address is one IPv4 address of an EthernetInterface.
+type IPv4Address struct {
+	Address string `json:"Address"`
+}
+
+// Processor represents one virtual CPU socket of a VM.
+// TotalCores is cores per socket and TotalThreads is cores x threads per socket.
+type Processor struct {
+	OdataContext  string `json:"@odata.context"`
+	OdataID       string `json:"@odata.id"`
+	OdataType     string `json:"@odata.type"`
+	ID            string `json:"Id"`
+	Name          string `json:"Name"`
+	Socket        string `json:"Socket"`
+	ProcessorType string `json:"ProcessorType"`
+	// ProcessorArchitecture is the Redfish family ("x86", "ARM") and
+	// InstructionSet the specific set ("x86-64", "ARM-A64"); both are omitted
+	// for architectures without a mapping.
+	ProcessorArchitecture string `json:"ProcessorArchitecture,omitempty"`
+	InstructionSet        string `json:"InstructionSet,omitempty"`
+	TotalCores            int    `json:"TotalCores"`
+	TotalThreads          int    `json:"TotalThreads"`
+	Model                 string `json:"Model,omitempty"`
+	Status                Status `json:"Status"`
+}

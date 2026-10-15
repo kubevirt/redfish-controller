@@ -1605,7 +1605,7 @@ func TestGetVMMemory(t *testing.T) {
 				}
 				mockClient.AddVM(vm)
 			},
-			expected: 2.0, // Default fallback
+			expected: 0, // Unknown: no invented default
 		},
 	}
 
@@ -1634,7 +1634,7 @@ func TestGetVMMemory(t *testing.T) {
 	}
 }
 
-// TestGetVMCPU tests the GetVMCPU function using MockDynamicClient
+// TestGetVMCPU tests the vCPU count derived from GetVMCPUTopology using MockDynamicClient
 func TestGetVMCPU(t *testing.T) {
 	testCases := []struct {
 		name     string
@@ -1688,7 +1688,7 @@ func TestGetVMCPU(t *testing.T) {
 				}
 				mockClient.AddVM(vm)
 			},
-			expected: 8,
+			expected: 16, // sockets x cores
 		},
 		{
 			name: "VM without CPU spec",
@@ -1724,14 +1724,15 @@ func TestGetVMCPU(t *testing.T) {
 			// Create client with mock clients
 			client := NewClientWithClients(fakeK8sClient, mockDynamicClient, 30*time.Second, nil)
 
-			// Call the actual GetVMCPU function
-			result, err := client.GetVMCPU("test-namespace", "test-vm")
+			// Total vCPUs come from the topology (sockets x cores x threads)
+			topology, err := client.GetVMCPUTopology("test-namespace", "test-vm")
+			result := topology.VCPUs()
 			if err != nil {
 				t.Fatalf("Unexpected error: %v", err)
 			}
 
 			if result != tc.expected {
-				t.Errorf("Expected %d CPU cores, got %d", tc.expected, result)
+				t.Errorf("Expected %d vCPUs, got %d", tc.expected, result)
 			}
 		})
 	}
