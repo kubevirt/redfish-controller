@@ -400,7 +400,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Chassis: []ChassisConfig{
 					{
-						Name:           "test_chassis", // Invalid: contains underscore
+						Name:           "test/chassis", // Invalid: contains a path separator
 						Namespace:      "test-namespace",
 						ServiceAccount: "test-sa",
 					},
@@ -856,8 +856,12 @@ func TestValidationHelperFunctions(t *testing.T) {
 	}{
 		{"valid chassis name", "test-chassis", true},
 		{"valid chassis with numbers", "test-chassis-123", true},
-		{"invalid chassis with underscore", "test_chassis", false},
-		{"invalid chassis with uppercase", "Test-Chassis", false},
+		{"valid chassis with underscore", "test_chassis", true},
+		{"valid chassis with uppercase", "Test-Chassis", true},
+		{"valid chassis with segment sub-delims", "Prod.Cluster~01+a=b", true},
+		{"invalid chassis with slash", "test/chassis", false},
+		{"invalid chassis with space", "test chassis", false},
+		{"invalid chassis with hash", "test#chassis", false},
 		{"empty chassis name", "", false},
 		{"chassis name too long", "a" + string(make([]byte, 63)), false},
 	}

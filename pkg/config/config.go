@@ -55,6 +55,7 @@ package config
 import (
 	"crypto/subtle"
 	"fmt"
+	"net/url"
 	"os"
 	"reflect"
 	"strconv"
@@ -392,7 +393,7 @@ func validateChassisConfigs(chassis []ChassisConfig) error {
 
 		// Validate chassis name format (alphanumeric and hyphens only)
 		if !isValidChassisName(ch.Name) {
-			return errors.NewValidationError("Invalid chassis name format", fmt.Sprintf("chassis[%d].name must contain only alphanumeric characters and hyphens, got '%s'", i, ch.Name))
+			return errors.NewValidationError("Invalid chassis name format", fmt.Sprintf("chassis[%d].name must be a valid URI path segment (letters, digits, and '-_.~$&+:=@'), got '%s'", i, ch.Name))
 		}
 
 		if ch.Namespace == "" {
@@ -565,12 +566,13 @@ func isValidChassisName(name string) bool {
 	if len(name) < 1 || len(name) > 63 {
 		return false
 	}
-	for _, char := range name {
-		if !((char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-') {
-			return false
-		}
-	}
-	return true
+	// A chassis name is exposed as a Redfish resource identifier and appears as a
+	// URI path segment (e.g. /redfish/v1/Chassis/{name}). Per DSP0266 §9.6.6 the
+	// identifier may contain far more than lowercase alphanumerics and hyphens, so
+	// accept any name that needs no escaping to be used as a path segment. This
+	// covers upper/lower alphanumerics, the unreserved marks (- _ . ~) and the
+	// sub-delims permitted in a segment, while rejecting '/', spaces, '#', etc.
+	return url.PathEscape(name) == name
 }
 
 func isValidNamespace(name string) bool {
