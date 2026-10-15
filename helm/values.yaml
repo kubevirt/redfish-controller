@@ -274,6 +274,10 @@ datavolume:
   # Set to false in production environments
   allow_insecure_tls: true
   
+  # Name of a ConfigMap containing custom CA certificates for TLS verification during ISO import.
+  # IMPORTANT: This ConfigMap must already exist in the target VirtualMachine's namespace.
+  # The Redfish controller does NOT create or manage this ConfigMap.
+  cert_config_map: ""
   # Storage class for PVC creation
   # Change this to match your cluster's available storage classes
   storage_class: ""

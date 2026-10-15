@@ -1104,6 +1104,7 @@ func TestGetDataVolumeConfig(t *testing.T) {
 		DataVolume: DataVolumeConfig{
 			StorageSize:        "10Gi",
 			AllowInsecureTLS:   true,
+			CertConfigMap:      "custom-ca-bundle",
 			StorageClass:       "fast-ssd",
 			VMUpdateTimeout:    "5m",
 			ISODownloadTimeout: "10m",
@@ -1111,7 +1112,7 @@ func TestGetDataVolumeConfig(t *testing.T) {
 		},
 	}
 
-	storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := config.GetDataVolumeConfig()
+	storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := config.GetDataVolumeConfig()
 
 	// Verify all returned values match the config
 	if storageSize != "10Gi" {
@@ -1119,6 +1120,9 @@ func TestGetDataVolumeConfig(t *testing.T) {
 	}
 	if !allowInsecureTLS {
 		t.Error("Expected allowInsecureTLS to be true")
+	}
+	if certConfigMap != "custom-ca-bundle" {
+		t.Errorf("Expected certConfigMap 'custom-ca-bundle', got '%s'", certConfigMap)
 	}
 	if storageClass != "fast-ssd" {
 		t.Errorf("Expected storageClass 'fast-ssd', got '%s'", storageClass)
@@ -1140,6 +1144,7 @@ func TestGetDataVolumeConfigWithEmptyValues(t *testing.T) {
 		DataVolume: DataVolumeConfig{
 			StorageSize:        "",
 			AllowInsecureTLS:   false,
+			CertConfigMap:      "",
 			StorageClass:       "",
 			VMUpdateTimeout:    "",
 			ISODownloadTimeout: "",
@@ -1147,7 +1152,7 @@ func TestGetDataVolumeConfigWithEmptyValues(t *testing.T) {
 		},
 	}
 
-	storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := config.GetDataVolumeConfig()
+	storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := config.GetDataVolumeConfig()
 
 	// Verify all returned values match the config
 	if storageSize != "" {
@@ -1155,6 +1160,9 @@ func TestGetDataVolumeConfigWithEmptyValues(t *testing.T) {
 	}
 	if allowInsecureTLS {
 		t.Error("Expected allowInsecureTLS to be false")
+	}
+	if certConfigMap != "" {
+		t.Errorf("Expected empty certConfigMap, got '%s'", certConfigMap)
 	}
 	if storageClass != "" {
 		t.Errorf("Expected empty storageClass, got '%s'", storageClass)
@@ -1477,5 +1485,54 @@ kubevirt:
 	}
 	if _, err := cfg.GetUserByCredentials("hash-user", "wrong"); err == nil {
 		t.Error("hash-user auth should fail with wrong password")
+	}
+}
+
+func TestLoadConfigWithCertConfigMap(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "test-cert-cm.yaml")
+
+	configContent := `
+server:
+  host: "127.0.0.1"
+  port: 8080
+  tls:
+    enabled: false
+
+chassis:
+  - name: "test-chassis"
+    namespace: "test-namespace"
+    service_account: "test-sa"
+    description: "Test chassis"
+
+authentication:
+  users:
+    - username: "admin"
+      password: "admin123"
+      chassis: ["test-chassis"]
+
+kubevirt:
+  api_version: "v1"
+  timeout: 60
+
+datavolume:
+  storage_size: "10Gi"
+  allow_insecure_tls: false
+  cert_config_map: "custom-ca-bundle"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if config.DataVolume.CertConfigMap != "custom-ca-bundle" {
+		t.Errorf("Expected CertConfigMap 'custom-ca-bundle', got '%s'", config.DataVolume.CertConfigMap)
+	}
+	if config.DataVolume.AllowInsecureTLS {
+		t.Error("Expected AllowInsecureTLS to be false")
 	}
 }

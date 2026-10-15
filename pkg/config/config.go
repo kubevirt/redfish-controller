@@ -201,9 +201,13 @@ type CDIUploadProxyConfig struct {
 
 // DataVolumeConfig holds configuration for DataVolume operations including ISO imports.
 // It includes storage settings, TLS certificate handling, timeout settings, and helper image configuration for ISO imports.
+//
+// CertConfigMap specifies the name of a ConfigMap containing custom CA certificates for TLS verification during ISO import.
+// This ConfigMap must pre-exist in the target VirtualMachine's namespace; the Redfish controller does not create or manage its lifecycle.
 type DataVolumeConfig struct {
 	StorageSize        string `mapstructure:"storage_size"`
 	AllowInsecureTLS   bool   `mapstructure:"allow_insecure_tls"`
+	CertConfigMap      string `mapstructure:"cert_config_map"`
 	StorageClass       string `mapstructure:"storage_class"`
 	VMUpdateTimeout    string `mapstructure:"vm_update_timeout"`
 	ISODownloadTimeout string `mapstructure:"iso_download_timeout"`
@@ -298,6 +302,7 @@ func setDefaults() {
 	viper.SetDefault("kubevirt.allow_insecure_tls", false)
 	viper.SetDefault("datavolume.storage_size", "10Gi")
 	viper.SetDefault("datavolume.allow_insecure_tls", false)
+	viper.SetDefault("datavolume.cert_config_map", "")
 	viper.SetDefault("datavolume.vm_update_timeout", "30s")
 	viper.SetDefault("datavolume.iso_download_timeout", "30m")
 	viper.SetDefault("datavolume.helper_image", "registry.access.redhat.com/ubi8/ubi-minimal:latest")
@@ -674,8 +679,8 @@ func (c *Config) GetChassisForUser(username string) ([]*ChassisConfig, error) {
 
 // GetDataVolumeConfig returns the DataVolume configuration settings.
 // This provides a safe way to access DataVolume settings without reflection.
-func (c *Config) GetDataVolumeConfig() (storageSize string, allowInsecureTLS bool, storageClass string, vmUpdateTimeout string, isoDownloadTimeout string, helperImage string) {
-	return c.DataVolume.StorageSize, c.DataVolume.AllowInsecureTLS, c.DataVolume.StorageClass, c.DataVolume.VMUpdateTimeout, c.DataVolume.ISODownloadTimeout, c.DataVolume.HelperImage
+func (c *Config) GetDataVolumeConfig() (storageSize string, allowInsecureTLS bool, certConfigMap string, storageClass string, vmUpdateTimeout string, isoDownloadTimeout string, helperImage string) {
+	return c.DataVolume.StorageSize, c.DataVolume.AllowInsecureTLS, c.DataVolume.CertConfigMap, c.DataVolume.StorageClass, c.DataVolume.VMUpdateTimeout, c.DataVolume.ISODownloadTimeout, c.DataVolume.HelperImage
 }
 
 // GetKubeVirtConfig returns the KubeVirt configuration settings.
@@ -744,7 +749,7 @@ kubevirt:
 datavolume:
   storage_size: "10Gi"           # Default storage size for DataVolumes
   allow_insecure_tls: false      # Allow insecure TLS for ISO downloads
-  storage_class: ""              # Storage class (empty = default)
+  cert_config_map: ""            # ConfigMap with custom CA certificate for TLS verification (must exist in the VM's target namespace; not managed by controller)
   vm_update_timeout: "30s"       # Timeout for VM updates
   iso_download_timeout: "30m"    # Timeout for ISO downloads
   helper_image: "alpine:latest"  # Container image for ISO copy operations
@@ -764,6 +769,7 @@ func logEnvironmentOverrides() {
 		"KUBEVIRT_REDFISH_KUBEVIRT_ALLOW_INSECURE_TLS",
 		"KUBEVIRT_REDFISH_DATAVOLUME_STORAGE_SIZE",
 		"KUBEVIRT_REDFISH_DATAVOLUME_ALLOW_INSECURE_TLS",
+		"KUBEVIRT_REDFISH_DATAVOLUME_CERT_CONFIG_MAP",
 		"KUBEVIRT_REDFISH_DATAVOLUME_VM_UPDATE_TIMEOUT",
 		"KUBEVIRT_REDFISH_DATAVOLUME_ISO_DOWNLOAD_TIMEOUT",
 		"KUBEVIRT_REDFISH_DATAVOLUME_HELPER_IMAGE",

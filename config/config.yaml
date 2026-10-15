@@ -43,6 +43,7 @@ cdi:
 datavolume:
   storage_size: "10Gi"                              # Storage size for ISO DataVolumes (10Gi is default / typically unchanged unless testing)
   allow_insecure_tls: true                          # Allow self-signed certificates for ISO imports
+  # cert_config_map: "custom-ca-bundle"             # ConfigMap with custom CA certificates for TLS verification (must pre-exist in the VM's target namespace; not managed by redfish-controller)
   storage_class: "lvms-vg1"                         # Storage class for ISO DataVolumes (will use default storageclass if not defined)
   vm_update_timeout: "2m"                           # Timeout for VM spec updates
-  iso_download_timeout: "30m"                       # Timeout for ISO downloads (large files) 
+  iso_download_timeout: "30m"                       # Timeout for ISO downloads (large files)
