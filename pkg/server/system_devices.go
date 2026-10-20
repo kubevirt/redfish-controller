@@ -42,19 +42,12 @@ const (
 var okStatus = redfish.Status{State: "Enabled", Health: "OK"}
 
 // handleSystemDevices serves the read-only hardware sub-resources of a system:
-// Memory, Processors, Storage (with Drives) and EthernetInterfaces. pathParts is the split
+// Memory, Processors, Storage (with Drives) and EthernetInterfaces. The caller has
+// already validated the method and resolved the VM with its access check. pathParts is the split
 // request path. For "/redfish/v1/Systems/vm-1/Storage/1/Drives/root" that is
 // ["", "redfish", "v1", "Systems", "vm-1", "Storage", "1", "Drives", "root"], so
 // pathParts[5:] starts at the sub-resource name ("Storage").
-func (s *Server) handleSystemDevices(w http.ResponseWriter, r *http.Request, systemName string, pathParts []string) {
-	if !s.validateMethod(w, r, []string{"GET"}) {
-		return
-	}
-	namespace, vmName, _, ok := s.resolveSystemVMandCheckAccess(w, r, systemName)
-	if !ok {
-		return
-	}
-
+func (s *Server) handleSystemDevices(w http.ResponseWriter, r *http.Request, namespace, vmName string, pathParts []string) {
 	// Drop a trailing empty element: "/redfish/v1/Systems/vm-1/Storage/" splits
 	// into [... "Storage", ""], which must be handled like "/Storage".
 	rest := pathParts[5:]

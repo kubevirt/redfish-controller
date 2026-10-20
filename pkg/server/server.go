@@ -802,7 +802,14 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	// whatever its path: otherwise a PATCH to a read-only resource is treated as
 	// a boot update instead of being answered with 405.
 	if len(pathParts) >= 6 && (pathParts[5] == "Memory" || pathParts[5] == "Processors" || pathParts[5] == "Storage" || pathParts[5] == "EthernetInterfaces") {
-		s.handleSystemDevices(w, r, systemName, pathParts)
+		if !s.validateMethod(w, r, []string{"GET"}) {
+			return
+		}
+		namespace, vmName, _, ok := s.resolveSystemVMandCheckAccess(w, r, systemName)
+		if !ok {
+			return
+		}
+		s.handleSystemDevices(w, r, namespace, vmName, pathParts)
 		return
 	}
 
