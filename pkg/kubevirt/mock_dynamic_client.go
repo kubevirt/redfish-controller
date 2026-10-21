@@ -23,9 +23,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,10 +56,28 @@ func deepCopyUnstructured(obj *unstructured.Unstructured) (*unstructured.Unstruc
 	return &unstructured.Unstructured{Object: newObj}, nil
 }
 
-// MockDynamicClient implements dynamic.Interface for testing
+// MockDynamicClient implements dynamic.Interface for testing.
+//
+// Writes follow the API server's rules that matter for read-modify-write
+// code: every stored object has a resourceVersion that is bumped on each
+// write, a patch is applied atomically, and a merge patch that carries a
+// metadata.resourceVersion different from the stored one is rejected with a
+// Conflict error.
 type MockDynamicClient struct {
 	mu        sync.RWMutex
 	resources map[string]map[string]*unstructured.Unstructured // "gvr/namespace" -> name -> object
+
+	// IgnoreResourceVersion accepts patches whose resourceVersion is stale,
+	// which is how the API server treats a patch that carries none. Tests use
+	// it to show what happens without the resourceVersion precondition.
+	IgnoreResourceVersion bool
+
+	// BeforePatch, when set, runs before a patch is applied and outside the
+	// store lock. Tests use it to let another writer change the object between
+	// a caller's read and its write. It must change the store through
+	// MutateVM or the dynamic interface, never through a *Client, which would
+	// re-enter the client's per-VM lock.
+	BeforePatch func(gvr schema.GroupVersionResource, namespace, name string, pt types.PatchType, data []byte)
 }
 
 // NewMockDynamicClient creates a new mock dynamic client
@@ -93,11 +113,80 @@ func (m *MockDynamicClient) addResource(gvr schema.GroupVersionResource, namespa
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if obj.GetResourceVersion() == "" {
+		obj.SetResourceVersion("1")
+	}
+	m.storeLocked(gvr, namespace, name, obj)
+}
+
+// storeLocked stores obj; the caller holds m.mu.
+func (m *MockDynamicClient) storeLocked(gvr schema.GroupVersionResource, namespace, name string, obj *unstructured.Unstructured) {
 	key := resourceKey(gvr, namespace)
 	if m.resources[key] == nil {
 		m.resources[key] = make(map[string]*unstructured.Unstructured)
 	}
 	m.resources[key][name] = obj
+}
+
+// getLocked returns the stored object; the caller holds m.mu.
+func (m *MockDynamicClient) getLocked(gvr schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, bool) {
+	key := resourceKey(gvr, namespace)
+	if m.resources[key] == nil {
+		return nil, false
+	}
+	obj, found := m.resources[key][name]
+	return obj, found
+}
+
+// bumpResourceVersion gives obj the next resourceVersion, as the API server
+// does on every successful write.
+func bumpResourceVersion(obj *unstructured.Unstructured) {
+	n, err := strconv.Atoi(obj.GetResourceVersion())
+	if err != nil {
+		n = 0
+	}
+	obj.SetResourceVersion(strconv.Itoa(n + 1))
+}
+
+func notFoundError(gvr schema.GroupVersionResource, name string) error {
+	return apierrors.NewNotFound(schema.GroupResource{Group: gvr.Group, Resource: gvr.Resource}, name)
+}
+
+func conflictError(gvr schema.GroupVersionResource, name string) error {
+	return apierrors.NewConflict(schema.GroupResource{Group: gvr.Group, Resource: gvr.Resource}, name,
+		fmt.Errorf("the object has been modified; please apply your changes to the latest version and try again"))
+}
+
+// MutateVM changes a stored VM in place, bumping its resourceVersion, the way
+// a write by another client would. It is safe to call from BeforePatch.
+func (m *MockDynamicClient) MutateVM(namespace, name string, mutate func(vm *kubevirtv1.VirtualMachine)) error {
+	gvr := schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	obj, found := m.getLocked(gvr, namespace, name)
+	if !found {
+		return notFoundError(gvr, name)
+	}
+	vm, err := unstructuredToVM(obj)
+	if err != nil {
+		return err
+	}
+	if vm.Labels == nil {
+		vm.Labels = map[string]string{}
+	}
+	if vm.Annotations == nil {
+		vm.Annotations = map[string]string{}
+	}
+	mutate(vm)
+	u, err := vmToUnstructured(vm)
+	if err != nil {
+		return err
+	}
+	bumpResourceVersion(u)
+	m.storeLocked(gvr, namespace, name, u)
+	return nil
 }
 
 // getResource gets a resource from the mock client
@@ -307,8 +396,18 @@ func (r *mockNamespaceableResource) Update(ctx context.Context, obj *unstructure
 	if err != nil {
 		return nil, err
 	}
-	r.client.addResource(r.gvr, namespace, name, copied)
-	return deepCopyUnstructured(obj)
+
+	r.client.mu.Lock()
+	defer r.client.mu.Unlock()
+
+	if existing, found := r.client.getLocked(r.gvr, namespace, name); found && !r.client.IgnoreResourceVersion {
+		if rv := copied.GetResourceVersion(); rv != "" && rv != existing.GetResourceVersion() {
+			return nil, conflictError(r.gvr, name)
+		}
+	}
+	bumpResourceVersion(copied)
+	r.client.storeLocked(r.gvr, namespace, name, copied)
+	return deepCopyUnstructured(copied)
 }
 
 // UpdateStatus implements dynamic.ResourceInterface
@@ -321,7 +420,7 @@ func (r *mockNamespaceableResource) Delete(ctx context.Context, name string, opt
 	if r.client.deleteResource(r.gvr, r.namespace, name) {
 		return nil
 	}
-	return fmt.Errorf("resource %s/%s not found", r.namespace, name)
+	return notFoundError(r.gvr, name)
 }
 
 // DeleteCollection implements dynamic.ResourceInterface
@@ -333,7 +432,7 @@ func (r *mockNamespaceableResource) DeleteCollection(ctx context.Context, option
 func (r *mockNamespaceableResource) Get(ctx context.Context, name string, options metav1.GetOptions, subresources ...string) (*unstructured.Unstructured, error) {
 	obj, found := r.client.getResource(r.gvr, r.namespace, name)
 	if !found {
-		return nil, fmt.Errorf("%s \"%s\" not found", r.gvr.Resource, name)
+		return nil, notFoundError(r.gvr, name)
 	}
 	return deepCopyUnstructured(obj)
 }
@@ -365,11 +464,19 @@ func (r *mockNamespaceableResource) Watch(ctx context.Context, opts metav1.ListO
 	return watch.NewFake(), nil
 }
 
-// Patch implements dynamic.ResourceInterface
+// Patch implements dynamic.ResourceInterface. The patch is applied under the
+// store lock so two concurrent patches cannot both start from the same copy.
 func (r *mockNamespaceableResource) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, options metav1.PatchOptions, subresources ...string) (*unstructured.Unstructured, error) {
-	obj, found := r.client.getResource(r.gvr, r.namespace, name)
+	if r.client.BeforePatch != nil {
+		r.client.BeforePatch(r.gvr, r.namespace, name, pt, data)
+	}
+
+	r.client.mu.Lock()
+	defer r.client.mu.Unlock()
+
+	obj, found := r.client.getLocked(r.gvr, r.namespace, name)
 	if !found {
-		return nil, fmt.Errorf("%s \"%s\" not found", r.gvr.Resource, name)
+		return nil, notFoundError(r.gvr, name)
 	}
 
 	// Make a copy to modify
@@ -378,8 +485,8 @@ func (r *mockNamespaceableResource) Patch(ctx context.Context, name string, pt t
 		return nil, err
 	}
 
-	// Apply JSON patch if it's a JSONPatchType
-	if pt == types.JSONPatchType {
+	switch pt {
+	case types.JSONPatchType:
 		var patches []jsonPatchOp
 		if err := json.Unmarshal(data, &patches); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal JSON patch: %w", err)
@@ -391,25 +498,36 @@ func (r *mockNamespaceableResource) Patch(ctx context.Context, name string, pt t
 			}
 		}
 
-		// Store the updated object
-		r.client.addResource(r.gvr, r.namespace, name, copied)
-	}
-
-	// Apply Merge patch if it's a MergePatchType (RFC 7396)
-	if pt == types.MergePatchType {
+	case types.MergePatchType: // RFC 7396
 		var patchMap map[string]interface{}
 		if err := json.Unmarshal(data, &patchMap); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal merge patch: %w", err)
 		}
 
+		if !r.client.IgnoreResourceVersion {
+			if rv := mergePatchResourceVersion(patchMap); rv != "" && rv != obj.GetResourceVersion() {
+				return nil, conflictError(r.gvr, name)
+			}
+		}
+
 		// Deep merge patchMap into copied.Object
 		mergeMaps(copied.Object, patchMap)
 
-		// Store the updated object
-		r.client.addResource(r.gvr, r.namespace, name, copied)
+	default:
+		return deepCopyUnstructured(copied)
 	}
 
+	bumpResourceVersion(copied)
+	r.client.storeLocked(r.gvr, r.namespace, name, copied)
 	return deepCopyUnstructured(copied)
+}
+
+// mergePatchResourceVersion returns metadata.resourceVersion from a decoded
+// merge patch, or "" when the patch does not carry one.
+func mergePatchResourceVersion(patchMap map[string]interface{}) string {
+	metadata, _ := patchMap["metadata"].(map[string]interface{})
+	rv, _ := metadata["resourceVersion"].(string)
+	return rv
 }
 
 // mergeMaps recursively merges src into dst according to RFC 7396 JSON Merge Patch.
