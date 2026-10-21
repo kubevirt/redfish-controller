@@ -103,19 +103,19 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Create KubeVirt client
-	kubevirtClient, err := kubevirt.NewClient(*kubeconfig, 30*time.Second, cfg)
-	if err != nil {
-		log.Fatalf("Failed to create KubeVirt client: %v", err)
-	}
-
-	// Initialize logger
+	// Initialize the logger before the client, which logs its settings
 	logLevel := logger.GetLogLevelFromEnv()
 	if logger.IsLoggingEnabled() {
 		logger.Init(logLevel)
 		logger.Info("KubeVirt Redfish server started with log level: %s", logLevel)
 	} else {
 		logger.Info("Logging disabled via REDFISH_LOGGING_ENABLED=false")
+	}
+
+	// Create KubeVirt client
+	kubevirtClient, err := kubevirt.NewClient(*kubeconfig, 30*time.Second, cfg)
+	if err != nil {
+		log.Fatalf("Failed to create KubeVirt client: %v", err)
 	}
 
 	// Create and start server

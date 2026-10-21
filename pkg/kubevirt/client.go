@@ -186,6 +186,29 @@ func volumeImportSourceToUnstructured(vis *cdiv1beta1.VolumeImportSource) (*unst
 	return u, nil
 }
 
+// kubeClientRateLimits returns the client-go QPS and burst for the Kubernetes
+// API client. They come from kubevirt.qps / kubevirt.burst in the app config
+// (or KUBEVIRT_REDFISH_KUBEVIRT_QPS / _BURST). Without a config, or for a
+// value left at zero, client-go's own defaults apply. Large deployments need
+// higher values: every Redfish request fans out to several API calls, and with
+// many BMHs polling at once the default limiter queues requests long enough
+// for the OpenShift route to time out.
+func kubeClientRateLimits(appConfig interface{}) (float32, int) {
+	qps, burst := rest.DefaultQPS, rest.DefaultBurst
+	if rl, ok := appConfig.(interface {
+		GetKubeClientRateLimits() (float32, int)
+	}); ok {
+		cfgQPS, cfgBurst := rl.GetKubeClientRateLimits()
+		if cfgQPS > 0 {
+			qps = cfgQPS
+		}
+		if cfgBurst > 0 {
+			burst = cfgBurst
+		}
+	}
+	return qps, burst
+}
+
 // NewClient creates a new KubeVirt client with connection pooling
 func NewClient(configPath string, timeout time.Duration, appConfig interface{}) (*Client, error) {
 	var config *rest.Config
@@ -202,6 +225,9 @@ func NewClient(configPath string, timeout time.Duration, appConfig interface{}) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kubeconfig: %w", err)
 	}
+
+	config.QPS, config.Burst = kubeClientRateLimits(appConfig)
+	logger.Info("Kubernetes client rate limits: qps=%v burst=%d", config.QPS, config.Burst)
 
 	// Initialize random seed for unique PVC name generation
 	rand.Seed(time.Now().UnixNano())

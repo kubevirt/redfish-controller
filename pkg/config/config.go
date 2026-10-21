@@ -50,6 +50,8 @@
 //	kubevirt:
 //	  api_version: "v1"
 //	  timeout: 30
+//	  qps: 5
+//	  burst: 10
 package config
 
 import (
@@ -68,6 +70,7 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
 	"golang.org/x/crypto/bcrypt"
+	"k8s.io/client-go/rest"
 )
 
 // Config represents the complete application configuration structure.
@@ -177,12 +180,26 @@ func passwordDecodeHook(from reflect.Type, to reflect.Type, data interface{}) (i
 	}
 }
 
+// Rate limits applied when kubevirt.qps / kubevirt.burst are left unset (zero).
+// They are client-go's own defaults, so behaviour is unchanged unless an
+// operator raises them for a large deployment.
+const (
+	DefaultKubeClientQPS   float32 = rest.DefaultQPS
+	DefaultKubeClientBurst int     = rest.DefaultBurst
+)
+
 // KubeVirtConfig holds KubeVirt-specific configuration parameters.
 // It includes API version settings, timeout configurations, and TLS settings for KubeVirt operations.
 type KubeVirtConfig struct {
 	APIVersion       string `mapstructure:"api_version"`
 	Timeout          int    `mapstructure:"timeout"`
 	AllowInsecureTLS bool   `mapstructure:"allow_insecure_tls"`
+	// QPS and Burst set the client-go rate limiter for calls to the Kubernetes
+	// API. They default to client-go's 5 / 10. Every Redfish request fans out
+	// to several API calls, so with many BMHs polling at once those defaults
+	// queue requests for tens of seconds; raise them for such deployments.
+	QPS   float32 `mapstructure:"qps"`
+	Burst int     `mapstructure:"burst"`
 }
 
 // CDIConfig holds CDI (Containerized Data Importer) configuration parameters.
@@ -297,6 +314,8 @@ func setDefaults() {
 	viper.SetDefault("kubevirt.api_version", "v1")
 	viper.SetDefault("kubevirt.timeout", 30)
 	viper.SetDefault("kubevirt.allow_insecure_tls", false)
+	viper.SetDefault("kubevirt.qps", DefaultKubeClientQPS)
+	viper.SetDefault("kubevirt.burst", DefaultKubeClientBurst)
 	viper.SetDefault("datavolume.storage_size", "10Gi")
 	viper.SetDefault("datavolume.allow_insecure_tls", false)
 	viper.SetDefault("datavolume.vm_update_timeout", "30s")
@@ -478,6 +497,20 @@ func validateKubeVirtConfig(kv *KubeVirtConfig) error {
 
 	if kv.Timeout < 1 || kv.Timeout > 300 {
 		return errors.NewValidationError("Invalid KubeVirt timeout", fmt.Sprintf("kubevirt.timeout must be between 1 and 300 seconds, got %d", kv.Timeout))
+	}
+
+	// Zero means "not set" (client-go's own convention): apply the defaults.
+	if kv.QPS == 0 {
+		kv.QPS = DefaultKubeClientQPS
+	}
+	if kv.Burst == 0 {
+		kv.Burst = DefaultKubeClientBurst
+	}
+	if kv.QPS < 0 {
+		return errors.NewValidationError("Invalid KubeVirt QPS", fmt.Sprintf("kubevirt.qps must be greater than 0, got %v", kv.QPS))
+	}
+	if kv.Burst < 0 {
+		return errors.NewValidationError("Invalid KubeVirt burst", fmt.Sprintf("kubevirt.burst must be greater than 0, got %d", kv.Burst))
 	}
 
 	return nil
@@ -674,6 +707,13 @@ func (c *Config) GetChassisForUser(username string) ([]*ChassisConfig, error) {
 	return nil, fmt.Errorf("user not found: %s", username)
 }
 
+// GetKubeClientRateLimits returns the client-go QPS and burst to use for the
+// Kubernetes API client. The kubevirt client discovers this method through a
+// type assertion, the same way it discovers GetDataVolumeConfig.
+func (c *Config) GetKubeClientRateLimits() (qps float32, burst int) {
+	return c.KubeVirt.QPS, c.KubeVirt.Burst
+}
+
 // GetDataVolumeConfig returns the DataVolume configuration settings.
 // This provides a safe way to access DataVolume settings without reflection.
 func (c *Config) GetDataVolumeConfig() (storageSize string, allowInsecureTLS bool, storageClass string, vmUpdateTimeout string, isoDownloadTimeout string, helperImage string) {
@@ -739,6 +779,8 @@ authentication:
 kubevirt:
   api_version: "v1"  # KubeVirt API version to use
   timeout: 30        # Timeout in seconds for KubeVirt operations
+  qps: 5             # client-go rate limit for Kubernetes API calls (sustained requests/second)
+  burst: 10          # client-go rate limit burst (max requests above qps in a spike)
 
 # DataVolume Configuration
 # ------------------------
