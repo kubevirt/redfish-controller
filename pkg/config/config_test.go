@@ -22,6 +22,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kubevirt/redfish-controller/pkg/errors"
@@ -102,6 +103,96 @@ kubevirt:
 	if config.KubeVirt.Timeout != 30 {
 		t.Errorf("Expected timeout 30, got %d", config.KubeVirt.Timeout)
 	}
+}
+
+// minimalConfig is the smallest config that passes validation, with the
+// kubevirt section supplied by the caller.
+func minimalConfig(kubevirtSection string) string {
+	return `
+server:
+  host: "127.0.0.1"
+  port: 8443
+  tls:
+    enabled: false
+
+chassis:
+  - name: "test-cluster"
+    namespace: "test-namespace"
+    service_account: "test-sa"
+
+authentication:
+  users:
+    - username: "testuser"
+      password: "testpass"
+      chassis: ["test-cluster"]
+
+kubevirt:
+  api_version: "v1"
+  timeout: 30
+` + kubevirtSection
+}
+
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	return configPath
+}
+
+func TestWorkersConfig(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		config, err := LoadConfig(writeConfig(t, minimalConfig("")))
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+		if config.Server.Workers != 8 {
+			t.Errorf("Expected default workers 8, got %d", config.Server.Workers)
+		}
+	})
+
+	t.Run("from config file", func(t *testing.T) {
+		content := strings.Replace(minimalConfig(""), "  port: 8443\n", "  port: 8443\n  workers: 3\n", 1)
+		config, err := LoadConfig(writeConfig(t, content))
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+		if config.Server.Workers != 3 {
+			t.Errorf("Expected workers 3 from config file, got %d", config.Server.Workers)
+		}
+	})
+
+	t.Run("from environment", func(t *testing.T) {
+		t.Setenv("KUBEVIRT_REDFISH_SERVER_WORKERS", "16")
+		config, err := LoadConfig(writeConfig(t, minimalConfig("")))
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+		if config.Server.Workers != 16 {
+			t.Errorf("Expected workers 16 from env, got %d", config.Server.Workers)
+		}
+	})
+
+	t.Run("rejects out-of-range values", func(t *testing.T) {
+		for _, v := range []string{"-1", "65"} {
+			t.Setenv("KUBEVIRT_REDFISH_SERVER_WORKERS", v)
+			if _, err := LoadConfig(writeConfig(t, minimalConfig(""))); err == nil {
+				t.Errorf("Expected validation error for workers=%s, got nil", v)
+			}
+		}
+	})
+
+	t.Run("zero means default", func(t *testing.T) {
+		t.Setenv("KUBEVIRT_REDFISH_SERVER_WORKERS", "0")
+		config, err := LoadConfig(writeConfig(t, minimalConfig("")))
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+		if config.Server.Workers != DefaultWorkers {
+			t.Errorf("Expected default workers %d for zero, got %d", DefaultWorkers, config.Server.Workers)
+		}
+	})
 }
 
 func TestLoadConfigWithDefaults(t *testing.T) {

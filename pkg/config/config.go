@@ -83,6 +83,10 @@ type Config struct {
 	SystemIDConvention string           `mapstructure:"system_id_convention"` // "legacy" or "enhanced"
 }
 
+// DefaultWorkers is the size of the background task pool when server.workers
+// is left unset.
+const DefaultWorkers = 8
+
 // ServerConfig holds HTTP server configuration including host, port, and TLS settings.
 // The server configuration determines how the Redfish API server listens for requests.
 type ServerConfig struct {
@@ -90,6 +94,9 @@ type ServerConfig struct {
 	Port     int       `mapstructure:"port"`
 	TLS      TLSConfig `mapstructure:"tls"`
 	TestMode bool      `mapstructure:"test_mode"` // Disables background processes for testing
+	// Workers is the size of the background task pool that runs virtual media
+	// inserts/ejects and other async Redfish tasks. Read once at startup.
+	Workers int `mapstructure:"workers"`
 }
 
 // TLSConfig holds TLS configuration for secure HTTPS connections.
@@ -293,6 +300,7 @@ func LoadConfig(configPath string) (*Config, error) {
 func setDefaults() {
 	viper.SetDefault("server.host", "0.0.0.0")
 	viper.SetDefault("server.port", 8443)
+	viper.SetDefault("server.workers", DefaultWorkers)
 	viper.SetDefault("server.tls.enabled", true)
 	viper.SetDefault("kubevirt.api_version", "v1")
 	viper.SetDefault("kubevirt.timeout", 30)
@@ -366,6 +374,15 @@ func validateServerConfig(server *ServerConfig) error {
 
 	if server.Port < 1 || server.Port > 65535 {
 		return errors.NewValidationError("Invalid server port", fmt.Sprintf("server.port must be between 1 and 65535, got %d", server.Port))
+	}
+
+	// Zero means "not set": apply the default so a Config built without viper
+	// (tests, programmatic use) validates the same way a loaded one does.
+	if server.Workers == 0 {
+		server.Workers = DefaultWorkers
+	}
+	if server.Workers < 1 || server.Workers > 64 {
+		return errors.NewValidationError("Invalid worker count", fmt.Sprintf("server.workers must be between 1 and 64, got %d", server.Workers))
 	}
 
 	if server.TLS.Enabled {
