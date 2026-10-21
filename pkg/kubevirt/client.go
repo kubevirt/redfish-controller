@@ -97,6 +97,11 @@ type Client struct {
 	pvcWatcherCtx    context.Context
 	pvcWatcherCancel context.CancelFunc
 	pvcWatcherWg     sync.WaitGroup
+
+	// Per-VM serialization of read-modify-write updates (see updateVM) and
+	// the backoff sleep between conflict retries, replaceable in tests.
+	vmLocks *keyedMutex
+	sleep   func(time.Duration)
 }
 
 // init registers KubeVirt and CDI types with the runtime scheme for conversion
@@ -143,6 +148,12 @@ func vmToUnstructured(vm *kubevirtv1.VirtualMachine) (*unstructured.Unstructured
 // computeVMPatch compares original and modified VMs and returns a JSON Merge Patch.
 // This preserves unknown fields that may exist in the cluster object but are not
 // represented in the typed VirtualMachine struct.
+//
+// The patch carries the resourceVersion of original. A merge patch replaces
+// arrays such as disks and volumes wholesale, so one computed from a stale
+// read would silently drop entries another writer just added; with the
+// resourceVersion in it, the API server rejects such a patch with a Conflict
+// and the caller (updateVM) recomputes it from a fresh read.
 func computeVMPatch(original, modified *kubevirtv1.VirtualMachine) ([]byte, error) {
 	originalJSON, err := json.Marshal(original)
 	if err != nil {
@@ -157,7 +168,10 @@ func computeVMPatch(original, modified *kubevirtv1.VirtualMachine) ([]byte, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to create merge patch: %w", err)
 	}
-	return patch, nil
+	if original.ResourceVersion == "" || isEmptyMergePatch(patch) {
+		return patch, nil
+	}
+	return withResourceVersion(patch, original.ResourceVersion)
 }
 
 // vmiToUnstructured converts a typed VirtualMachineInstance to an unstructured object
@@ -238,6 +252,8 @@ func NewClient(configPath string, timeout time.Duration, appConfig interface{}) 
 		timeout:          timeout,
 		appConfig:        appConfig,
 		httpClient:       httpClient,
+		vmLocks:          newKeyedMutex(),
+		sleep:            time.Sleep,
 	}, nil
 }
 
@@ -255,6 +271,8 @@ func NewClientWithClients(
 		timeout:          timeout,
 		appConfig:        appConfig,
 		config:           &rest.Config{},
+		vmLocks:          newKeyedMutex(),
+		sleep:            time.Sleep,
 		httpClient: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
@@ -1419,54 +1437,32 @@ func (c *Client) RecordVMBootOptionsAsAnnotations(namespace, name string, option
 
 	logger.Info("Setting boot options for VM %s/%s: %v", namespace, name, options)
 
-	// Get the current VM
-	vm, err := c.GetVM(namespace, name)
-	if err != nil {
-		return fmt.Errorf("failed to get VM %s: %w", name, err)
-	}
-
-	// Update VM with boot options
-	vmCopy := vm.DeepCopy()
-
 	// Store boot options in VM annotations for persistence
-	annotations := vmCopy.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-
-	// Update annotations with boot options
-	if bootSourceOverrideEnabled, found := options["bootSourceOverrideEnabled"]; found {
-		if enabled, ok := bootSourceOverrideEnabled.(string); ok {
-			annotations["redfish.boot.source.override.enabled"] = enabled
+	_, err := c.updateVM(ctx, namespace, name, func(vmCopy *kubevirtv1.VirtualMachine) error {
+		annotations := vmCopy.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
 		}
-	}
-	if bootSourceOverrideTarget, found := options["bootSourceOverrideTarget"]; found {
-		if target, ok := bootSourceOverrideTarget.(string); ok {
-			annotations["redfish.boot.source.override.target"] = target
+
+		if bootSourceOverrideEnabled, found := options["bootSourceOverrideEnabled"]; found {
+			if enabled, ok := bootSourceOverrideEnabled.(string); ok {
+				annotations["redfish.boot.source.override.enabled"] = enabled
+			}
 		}
-	}
-	if bootSourceOverrideMode, found := options["bootSourceOverrideMode"]; found {
-		if mode, ok := bootSourceOverrideMode.(string); ok {
-			annotations["redfish.boot.source.override.mode"] = mode
+		if bootSourceOverrideTarget, found := options["bootSourceOverrideTarget"]; found {
+			if target, ok := bootSourceOverrideTarget.(string); ok {
+				annotations["redfish.boot.source.override.target"] = target
+			}
 		}
-	}
+		if bootSourceOverrideMode, found := options["bootSourceOverrideMode"]; found {
+			if mode, ok := bootSourceOverrideMode.(string); ok {
+				annotations["redfish.boot.source.override.mode"] = mode
+			}
+		}
 
-	vmCopy.SetAnnotations(annotations)
-
-	// Compute merge patch from changes (preserves unknown fields)
-	patch, err := computeVMPatch(vm, vmCopy)
-	if err != nil {
-		return fmt.Errorf("failed to compute VM patch: %w", err)
-	}
-
-	// Apply patch
-	gvr := schema.GroupVersionResource{
-		Group:    "kubevirt.io",
-		Version:  "v1",
-		Resource: "virtualmachines",
-	}
-
-	_, err = c.dynamicClient.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+		vmCopy.SetAnnotations(annotations)
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to update VM boot options: %w", err)
 	}
@@ -1738,43 +1734,13 @@ func (c *Client) insertVirtualMediaAsync(namespace, name, mediaID, imageURL stri
 	logger.Info("Creating CD-ROM device %s in VM spec first", deviceName)
 	logger.Debug("Creating CD-ROM device %s in VM spec", deviceName)
 
+	// Only the spec change runs under the per-VM lock; PVC creation and the
+	// ISO download below are slow and must not block other writers.
+	// dataVolumeName was generated once above so a retried update keeps the
+	// same PVC name.
 	var oldPVCName string
-
-	maxRetries := 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		logger.Debug("VM update attempt %d/%d", attempt, maxRetries)
-
-		vm, err := c.GetVM(namespace, name)
-		if err != nil {
-			logger.Error("Failed to get VM %s/%s: %v", namespace, name, err)
-			return fmt.Errorf("failed to get VM %s: %w", name, err)
-		}
-		logger.Debug("Successfully retrieved VM %s/%s", namespace, name)
-
-		vmCopy := vm.DeepCopy()
-
-		if vmCopy.Spec.Template == nil {
-			vmCopy.Spec.Template = &kubevirtv1.VirtualMachineInstanceTemplateSpec{}
-		}
-
-		diskExists := false
-		for _, disk := range vmCopy.Spec.Template.Spec.Domain.Devices.Disks {
-			if disk.Name == deviceName {
-				diskExists = true
-				break
-			}
-		}
-
-		if !diskExists {
-			newDisk := kubevirtv1.Disk{
-				Name: deviceName,
-				DiskDevice: kubevirtv1.DiskDevice{
-					CDRom: &kubevirtv1.CDRomTarget{
-						Bus: kubevirtv1.DiskBusSATA,
-					},
-				},
-			}
-			vmCopy.Spec.Template.Spec.Domain.Devices.Disks = append(vmCopy.Spec.Template.Spec.Domain.Devices.Disks, newDisk)
+	_, err = c.updateVM(ctx, namespace, name, func(vmCopy *kubevirtv1.VirtualMachine) error {
+		if addCDROMDisk(vmCopy, deviceName) {
 			logger.Info("Added new CD-ROM device %s", deviceName)
 		}
 
@@ -1823,34 +1789,19 @@ func (c *Client) insertVirtualMediaAsync(namespace, name, mediaID, imageURL stri
 		annotations[VirtualMediaURLAnnotationPrefix+deviceName] = imageURL
 		vmCopy.SetAnnotations(annotations)
 
-		// Compute merge patch from changes (preserves unknown fields)
-		patch, err := computeVMPatch(vm, vmCopy)
-		if err != nil {
-			logger.Error("Failed to compute VM patch: %v", err)
-			return fmt.Errorf("failed to compute VM patch: %w", err)
+		// Ironic sends the boot override right after the insert request. When
+		// the override reached the VM first it could only order the disks that
+		// existed then, so the new CD-ROM is placed first now. The result is
+		// the same whichever request reached the VM first.
+		if bootOverrideWantsCD(vmCopy) {
+			logger.Info("Boot override to CD is pending for VM %s/%s, placing %s first in the boot order", namespace, name, deviceName)
+			return c.applyPendingCDBootOverride(vmCopy, deviceName)
 		}
-
-		gvrVM := schema.GroupVersionResource{
-			Group:    "kubevirt.io",
-			Version:  "v1",
-			Resource: "virtualmachines",
-		}
-
-		logger.Debug("Updating VM %s/%s with new CD-ROM device", namespace, name)
-		_, err = c.dynamicClient.Resource(gvrVM).Namespace(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
-		if err != nil {
-			if strings.Contains(err.Error(), "the object has been modified") && attempt < maxRetries {
-				logger.Info("Concurrent modification detected, retrying VM update (attempt %d/%d)", attempt, maxRetries)
-				logger.Debug("Concurrent modification detected, retrying VM update (attempt %d/%d)", attempt, maxRetries)
-				time.Sleep(time.Duration(attempt) * time.Second)
-				continue
-			}
-			logger.Error("Failed to update VM %s/%s: %v", namespace, name, err)
-			return fmt.Errorf("failed to update VM: %w", err)
-		}
-
-		logger.Debug("Successfully updated VM %s/%s on attempt %d", namespace, name, attempt)
-		break
+		return nil
+	})
+	if err != nil {
+		logger.Error("Failed to update VM %s/%s: %v", namespace, name, err)
+		return fmt.Errorf("failed to update VM: %w", err)
 	}
 
 	logger.Info("Successfully created CD-ROM device %s in VM spec", deviceName)
@@ -2221,41 +2172,19 @@ func (c *Client) SetBootOrder(namespace, name, bootTarget string) error {
 
 	logger.Info("Setting boot order to %s for VM %s/%s", bootTarget, namespace, name)
 
-	// Get the current VM
-	vm, err := c.GetVM(namespace, name)
-	if err != nil {
-		return fmt.Errorf("failed to get VM %s: %w", name, err)
-	}
+	_, err := c.updateVM(ctx, namespace, name, func(vmCopy *kubevirtv1.VirtualMachine) error {
+		// Collect current volumes and detect their type
+		// This is needed, because the device list does not provide enough
+		// information about disk type and there are disks that are not bootable
+		// like cloud init.
+		if err := c.modifyVmBootOrder(vmCopy, bootTarget); err != nil {
+			return err
+		}
 
-	// Update VM with boot order configuration
-	vmCopy := vm.DeepCopy()
-
-	// Collect current volumes and detect their type
-	// This is needed, because the device list does not provide enough
-	// information about disk type and there are disks that are not bootable
-	// like cloud init.
-	err = c.modifyVmBootOrder(vmCopy, bootTarget)
-	if err != nil {
-		return err
-	}
-
-	// A permanent boot order change supersedes any pending boot-once state.
-	c.clearBootOnceState(vmCopy)
-
-	// Compute merge patch from changes (preserves unknown fields)
-	patch, err := computeVMPatch(vm, vmCopy)
-	if err != nil {
-		return fmt.Errorf("failed to compute VM patch: %w", err)
-	}
-
-	// Apply patch
-	gvr := schema.GroupVersionResource{
-		Group:    "kubevirt.io",
-		Version:  "v1",
-		Resource: "virtualmachines",
-	}
-
-	_, err = c.dynamicClient.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+		// A permanent boot order change supersedes any pending boot-once state.
+		c.clearBootOnceState(vmCopy)
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to update VM boot order: %w", err)
 	}
@@ -2339,106 +2268,84 @@ func (c *Client) SetBootOnce(namespace, name, bootTarget string) error {
 
 	logger.Info("Setting boot once to %s for VM %s/%s", bootTarget, namespace, name)
 
-	// Get the current VM
-	vm, err := c.GetVM(namespace, name)
-	if err != nil {
-		return fmt.Errorf("failed to get VM %s: %w", name, err)
-	}
+	var currentVMIUID string
+	_, err := c.updateVM(ctx, namespace, name, func(vmCopy *kubevirtv1.VirtualMachine) error {
+		annotations := vmCopy.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		vmLabels := vmCopy.GetLabels()
+		if vmLabels == nil {
+			vmLabels = make(map[string]string)
+		}
 
-	// Update VM with boot once configuration
-	vmCopy := vm.DeepCopy()
+		// Check if boot-once is already configured
+		existingOriginalConfig := annotations[BootOnceOriginalConfigAnnotation]
+		existingVMIUID := annotations[BootOnceVMIUIDAnnotation]
+		hasExistingBootOnce := existingOriginalConfig != ""
 
-	// Get current annotations and labels
-	annotations := vmCopy.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-	vmLabels := vmCopy.GetLabels()
-	if vmLabels == nil {
-		vmLabels = make(map[string]string)
-	}
+		currentVMIUID = c.getVMIUID(namespace, name)
 
-	// Check if boot-once is already configured
-	existingOriginalConfig := annotations[BootOnceOriginalConfigAnnotation]
-	existingVMIUID := annotations[BootOnceVMIUIDAnnotation]
-	hasExistingBootOnce := existingOriginalConfig != ""
+		if hasExistingBootOnce {
+			// Boot-once already configured - check if the recorded VMI is still running
+			if existingVMIUID != "" && existingVMIUID == currentVMIUID {
+				// Same VMI is still running - keep original config, just update boot order
+				logger.Info("Boot-once already configured for VM %s/%s with same VMI, updating boot target only", namespace, name)
+			} else {
+				// VMI has changed or was empty - clear old state and capture new original config
+				logger.Info("Boot-once state is stale for VM %s/%s (VMI changed), capturing new original config", namespace, name)
 
-	// Get current VMI UID
-	currentVMIUID := c.getVMIUID(namespace, name)
+				// Restore the original boot order so we capture the real original state below
+				if err := c.restoreBootOrder(vmCopy, existingOriginalConfig); err != nil {
+					logger.Warning("Failed to restore original boot order before recapture: %v", err)
+				}
 
-	if hasExistingBootOnce {
-		// Boot-once already configured - check if the recorded VMI is still running
-		if existingVMIUID != "" && existingVMIUID == currentVMIUID {
-			// Same VMI is still running - keep original config, just update boot order
-			logger.Info("Boot-once already configured for VM %s/%s with same VMI, updating boot target only", namespace, name)
-		} else {
-			// VMI has changed or was empty - clear old state and capture new original config
-			logger.Info("Boot-once state is stale for VM %s/%s (VMI changed), capturing new original config", namespace, name)
-
-			// Restore the original boot order so we capture the real original state below
-			if err := c.restoreBootOrder(vmCopy, existingOriginalConfig); err != nil {
-				logger.Warning("Failed to restore original boot order before recapture: %v", err)
+				// Capture the (now restored) boot order as the new original config
+				originalConfig, err := c.captureCurrentBootOrder(vmCopy)
+				if err != nil {
+					return fmt.Errorf("failed to capture boot order: %w", err)
+				}
+				annotations[BootOnceOriginalConfigAnnotation] = originalConfig
+				annotations[BootOnceVMIUIDAnnotation] = currentVMIUID
+				// Keep existing BootOnceOriginalRebootPolicyAnnotation — it
+				// already holds the real original value from the first SetBootOnce call.
 			}
-
-			// Capture the (now restored) boot order as the new original config
+		} else {
+			// No existing boot-once — capture current boot order and rebootPolicy
 			originalConfig, err := c.captureCurrentBootOrder(vmCopy)
 			if err != nil {
 				return fmt.Errorf("failed to capture boot order: %w", err)
 			}
 			annotations[BootOnceOriginalConfigAnnotation] = originalConfig
 			annotations[BootOnceVMIUIDAnnotation] = currentVMIUID
-			// Keep existing BootOnceOriginalRebootPolicyAnnotation — it
-			// already holds the real original value from the first SetBootOnce call.
+			if vmCopy.Spec.Template != nil && vmCopy.Spec.Template.Spec.Domain.RebootPolicy != nil {
+				annotations[BootOnceOriginalRebootPolicyAnnotation] = string(*vmCopy.Spec.Template.Spec.Domain.RebootPolicy)
+			}
 		}
-	} else {
-		// No existing boot-once — capture current boot order and rebootPolicy
-		originalConfig, err := c.captureCurrentBootOrder(vmCopy)
-		if err != nil {
-			return fmt.Errorf("failed to capture boot order: %w", err)
+
+		// Add boot-once label for watch selector
+		vmLabels[BootOnceLabel] = "enabled"
+		vmCopy.SetLabels(vmLabels)
+
+		// Store Redfish boot override annotations
+		annotations["redfish.boot.source.override.enabled"] = "Once"
+		annotations["redfish.boot.source.override.target"] = bootTarget
+		annotations["redfish.boot.source.override.mode"] = "UEFI"
+		vmCopy.SetAnnotations(annotations)
+
+		// Modify boot order to boot from target
+		if err := c.modifyVmBootOrder(vmCopy, bootTarget); err != nil {
+			return fmt.Errorf("failed to modify boot order: %w", err)
 		}
-		annotations[BootOnceOriginalConfigAnnotation] = originalConfig
-		annotations[BootOnceVMIUIDAnnotation] = currentVMIUID
-		if vmCopy.Spec.Template != nil && vmCopy.Spec.Template.Spec.Domain.RebootPolicy != nil {
-			annotations[BootOnceOriginalRebootPolicyAnnotation] = string(*vmCopy.Spec.Template.Spec.Domain.RebootPolicy)
+
+		// Set rebootPolicy to Terminate so that KubeVirt destroys the VMI on
+		// guest-initiated reboot and we can detect the VMI UID change.
+		if vmCopy.Spec.Template != nil {
+			terminate := kubevirtv1.RebootPolicyTerminate
+			vmCopy.Spec.Template.Spec.Domain.RebootPolicy = &terminate
 		}
-	}
-
-	// Add boot-once label for watch selector
-	vmLabels[BootOnceLabel] = "enabled"
-	vmCopy.SetLabels(vmLabels)
-
-	// Store Redfish boot override annotations
-	annotations["redfish.boot.source.override.enabled"] = "Once"
-	annotations["redfish.boot.source.override.target"] = bootTarget
-	annotations["redfish.boot.source.override.mode"] = "UEFI"
-	vmCopy.SetAnnotations(annotations)
-
-	// Modify boot order to boot from target
-	if err := c.modifyVmBootOrder(vmCopy, bootTarget); err != nil {
-		return fmt.Errorf("failed to modify boot order: %w", err)
-	}
-
-	// Set rebootPolicy to Terminate so that KubeVirt destroys the VMI on
-	// guest-initiated reboot and we can detect the VMI UID change.
-	if vmCopy.Spec.Template != nil {
-		terminate := kubevirtv1.RebootPolicyTerminate
-		vmCopy.Spec.Template.Spec.Domain.RebootPolicy = &terminate
-	}
-
-	// Compute merge patch from changes (preserves unknown fields)
-	patch, err := computeVMPatch(vm, vmCopy)
-	if err != nil {
-		return fmt.Errorf("failed to compute VM patch: %w", err)
-	}
-
-	// Apply patch
-	gvr := schema.GroupVersionResource{
-		Group:    "kubevirt.io",
-		Version:  "v1",
-		Resource: "virtualmachines",
-	}
-
-	_, err = c.dynamicClient.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to update VM boot once configuration: %w", err)
 	}
@@ -2454,89 +2361,60 @@ func (c *Client) EjectVirtualMedia(namespace, name, mediaID string) error {
 
 	logger.Info("Ejecting virtual media %s for VM %s/%s", mediaID, namespace, name)
 
-	// Get the current VM
-	vm, err := c.GetVM(namespace, name)
-	if err != nil {
-		logger.Error("Failed to get VM %s/%s for ejection: %v", namespace, name, err)
-		return fmt.Errorf("failed to get VM %s: %w", name, err)
-	}
+	// The PVC name and the helper pod name are taken from the copy that is
+	// actually written, because PVC names carry unique suffixes and a retried
+	// update may see a different one.
+	var actualPVCName, helperPodName string
+	_, err := c.updateVM(ctx, namespace, name, func(vmCopy *kubevirtv1.VirtualMachine) error {
+		if vmCopy.Spec.Template == nil {
+			logger.Warning("No template found in VM %s/%s when trying to eject media %s", namespace, name, mediaID)
+			return fmt.Errorf("no template found in VM")
+		}
 
-	logger.Debug("Current VM spec before ejection")
+		actualPVCName = ""
+		helperPodName = vmCopy.GetLabels()[ImportingLabelPrefix+mediaID]
 
-	// Get the actual PVC name from the volume BEFORE removing it from the VM
-	// This is necessary because PVC names have unique identifiers appended
-	var actualPVCName string
-	if vm.Spec.Template != nil {
-		for _, volume := range vm.Spec.Template.Spec.Volumes {
-			if volume.Name == mediaID && volume.PersistentVolumeClaim != nil {
-				actualPVCName = volume.PersistentVolumeClaim.ClaimName
-				logger.Info("Found actual PVC name %s for media %s", actualPVCName, mediaID)
-				break
+		// Remove the specified disk from disks list
+		var newDisks []kubevirtv1.Disk
+		foundDisk := false
+		for _, disk := range vmCopy.Spec.Template.Spec.Domain.Devices.Disks {
+			if disk.Name != mediaID {
+				newDisks = append(newDisks, disk)
+			} else {
+				logger.Info("Removing CD-ROM device %s from VM spec", mediaID)
+				foundDisk = true
 			}
 		}
-	}
-
-	// Update VM to remove CD-ROM disk and volume reference
-	vmCopy := vm.DeepCopy()
-
-	if vmCopy.Spec.Template == nil {
-		logger.Warning("No template found in VM %s/%s when trying to eject media %s", namespace, name, mediaID)
-		return fmt.Errorf("no template found in VM")
-	}
-
-	// Remove the specified disk from disks list
-	var newDisks []kubevirtv1.Disk
-	foundDisk := false
-	for _, disk := range vmCopy.Spec.Template.Spec.Domain.Devices.Disks {
-		if disk.Name != mediaID {
-			newDisks = append(newDisks, disk)
-		} else {
-			logger.Info("Removing CD-ROM device %s from VM spec", mediaID)
-			foundDisk = true
+		if !foundDisk {
+			logger.Warning("CD-ROM device %s not found in VM %s/%s disks list during ejection", mediaID, namespace, name)
 		}
-	}
-	if !foundDisk {
-		logger.Warning("CD-ROM device %s not found in VM %s/%s disks list during ejection", mediaID, namespace, name)
-	}
-	vmCopy.Spec.Template.Spec.Domain.Devices.Disks = newDisks
+		vmCopy.Spec.Template.Spec.Domain.Devices.Disks = newDisks
 
-	// Remove the volume reference
-	var newVolumes []kubevirtv1.Volume
-	foundVolume := false
-	for _, volume := range vmCopy.Spec.Template.Spec.Volumes {
-		if volume.Name != mediaID {
-			newVolumes = append(newVolumes, volume)
-		} else {
+		// Remove the volume reference
+		var newVolumes []kubevirtv1.Volume
+		foundVolume := false
+		for _, volume := range vmCopy.Spec.Template.Spec.Volumes {
+			if volume.Name != mediaID {
+				newVolumes = append(newVolumes, volume)
+				continue
+			}
+			if volume.PersistentVolumeClaim != nil {
+				actualPVCName = volume.PersistentVolumeClaim.ClaimName
+				logger.Info("Found actual PVC name %s for media %s", actualPVCName, mediaID)
+			}
 			logger.Info("Removing volume reference %s from VM spec", mediaID)
 			foundVolume = true
 		}
-	}
-	if !foundVolume {
-		logger.Warning("Volume reference %s not found in VM %s/%s during ejection", mediaID, namespace, name)
-	}
-	vmCopy.Spec.Template.Spec.Volumes = newVolumes
+		if !foundVolume {
+			logger.Warning("Volume reference %s not found in VM %s/%s during ejection", mediaID, namespace, name)
+		}
+		vmCopy.Spec.Template.Spec.Volumes = newVolumes
 
-	annotations := vmCopy.GetAnnotations()
-	delete(annotations, VirtualMediaURLAnnotationPrefix+mediaID)
-	vmCopy.SetAnnotations(annotations)
-
-	// Compute merge patch from changes (preserves unknown fields)
-	patch, err := computeVMPatch(vm, vmCopy)
-	if err != nil {
-		logger.Error("Failed to compute VM patch for %s/%s: %v", namespace, name, err)
-		return fmt.Errorf("failed to compute VM patch: %w", err)
-	}
-
-	logger.Debug("VM spec after removing CD-ROM and volume")
-
-	// Apply patch
-	gvr := schema.GroupVersionResource{
-		Group:    "kubevirt.io",
-		Version:  "v1",
-		Resource: "virtualmachines",
-	}
-
-	_, err = c.dynamicClient.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+		annotations := vmCopy.GetAnnotations()
+		delete(annotations, VirtualMediaURLAnnotationPrefix+mediaID)
+		vmCopy.SetAnnotations(annotations)
+		return nil
+	})
 	if err != nil {
 		logger.Error("Failed to update VM %s/%s after removing CD-ROM and volume: %v", namespace, name, err)
 		return fmt.Errorf("failed to update VM: %w", err)
@@ -2546,8 +2424,6 @@ func (c *Client) EjectVirtualMedia(namespace, name, mediaID string) error {
 
 	// Kill any running helper pod for this device and remove the importing label
 	// so a stale pod cannot trigger a deferred power-on after the media is gone.
-	labelKey := ImportingLabelPrefix + mediaID
-	helperPodName := vm.GetLabels()[labelKey]
 	if helperPodName != "" {
 		logger.Info("Cleaning up active import for device %s: deleting helper pod %s and removing importing label", mediaID, helperPodName)
 		if delErr := c.kubernetesClient.CoreV1().Pods(namespace).Delete(ctx, helperPodName, metav1.DeleteOptions{}); delErr != nil {
@@ -3270,6 +3146,10 @@ func (c *Client) handleVMUpdate(vm *kubevirtv1.VirtualMachine) {
 		return
 	}
 
+	// A lost write can leave an inserted device with its volume but no disk
+	// entry; put the disk back before anything else looks at the VM.
+	c.repairVirtualMediaDevices(currentVM)
+
 	vmLabels := currentVM.GetLabels()
 
 	// Handle power-after-import if applicable
@@ -3314,35 +3194,28 @@ func (c *Client) handleVMUpdate(vm *kubevirtv1.VirtualMachine) {
 		logger.Info("VMI UID changed for VM %s/%s (recorded: %s, current: %s), restoring boot order",
 			namespace, name, recordedVMIUID, currentVMIUID)
 
-		vmCopy := currentVM.DeepCopy()
-
-		// Restore the original boot order
-		if err := c.restoreBootOrder(vmCopy, originalConfig); err != nil {
-			logger.Error("Failed to restore boot order for VM %s/%s: %v", namespace, name, err)
-			return
-		}
-
-		// Remove boot-once state (label, annotations) and restore original rebootPolicy
-		c.clearBootOnceState(vmCopy)
-
-		// Compute merge patch from changes (preserves unknown fields)
-		patch, err := computeVMPatch(currentVM, vmCopy)
-		if err != nil {
-			logger.Error("Failed to compute VM patch: %v", err)
-			return
-		}
-
-		// Apply patch
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 		defer cancel()
 
-		gvr := schema.GroupVersionResource{
-			Group:    "kubevirt.io",
-			Version:  "v1",
-			Resource: "virtualmachines",
-		}
+		_, err := c.updateVM(ctx, namespace, name, func(vmCopy *kubevirtv1.VirtualMachine) error {
+			// Decide again on the fresh copy: another writer, or an earlier
+			// pass of this watcher, may already have restored the VM.
+			if vmCopy.GetLabels()[BootOnceLabel] != "enabled" {
+				return nil
+			}
+			originalConfig := vmCopy.GetAnnotations()[BootOnceOriginalConfigAnnotation]
+			if originalConfig == "" {
+				return nil
+			}
 
-		_, err = c.dynamicClient.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+			if err := c.restoreBootOrder(vmCopy, originalConfig); err != nil {
+				return fmt.Errorf("failed to restore boot order: %w", err)
+			}
+
+			// Remove boot-once state (label, annotations) and restore original rebootPolicy
+			c.clearBootOnceState(vmCopy)
+			return nil
+		})
 		if err != nil {
 			logger.Error("Failed to update VM %s/%s with restored boot order: %v", namespace, name, err)
 			return
