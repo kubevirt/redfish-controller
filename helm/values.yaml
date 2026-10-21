@@ -257,6 +257,12 @@ kubevirt:
   # Timeout for KubeVirt API operations (in seconds)
   timeout: 30
   
+  # Serve read-only VM/VMI lookups (power state, inventory, boot options,
+  # virtual media state, collections) from an in-memory informer cache instead
+  # of the Kubernetes API. Write paths always read live. Set false to fall back
+  # to one API call per lookup.
+  cache_enabled: true
+
   # Allow insecure TLS for KubeVirt API operations
   # Set to false in production environments
   allow_insecure_tls: true
