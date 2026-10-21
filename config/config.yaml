@@ -2,6 +2,7 @@
 kubevirt:
   api_version: "v1"                                 # Kubevirt API version (v1 is default (typically unchanged unless testing)
   timeout: 30                                       # Timeout for Kubevirt API calls (30 seconds is default (typically unchanged unless testing)
+  cache_enabled: true                               # Serve read-only VM/VMI lookups from an informer cache instead of the API (true is default)
 
 server:
   host: "0.0.0.0"                                   # Host for the Redfish server (0.0.0.0 is default (typically unchanged unless testing)
