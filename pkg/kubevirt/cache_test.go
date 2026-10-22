@@ -20,22 +20,17 @@
 package kubevirt
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -50,20 +45,20 @@ func testVM(namespace, name string, lbls map[string]string) *unstructured.Unstru
 	return u
 }
 
-// newCacheTestClient builds a Client over a fake dynamic client, wrapped by
-// the write tracker exactly as the constructors do.
-func newCacheTestClient(t *testing.T, appConfig interface{}, objs ...runtime.Object) (*Client, *dynamicfake.FakeDynamicClient) {
+func withBootTarget(u *unstructured.Unstructured, target string) *unstructured.Unstructured {
+	u.SetAnnotations(map[string]string{"redfish.boot.source.override.target": target})
+	return u
+}
+
+func newCacheTestClient(t *testing.T, objs ...runtime.Object) (*Client, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
 	fake := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		vmGVR:  "VirtualMachineList",
 		vmiGVR: "VirtualMachineInstanceList",
 	}, objs...)
-	writes := newWriteTracker()
 	c := &Client{
-		dynamicClient: newTrackingDynamicClient(fake, writes),
-		writes:        writes,
+		dynamicClient: fake,
 		timeout:       5 * time.Second,
-		appConfig:     appConfig,
 	}
 	c.metrics.operationCounts = make(map[string]int64)
 	c.metrics.operationTimes = make(map[string]time.Duration)
@@ -94,7 +89,7 @@ func failGets(fake *dynamicfake.FakeDynamicClient, msg string) {
 }
 
 func TestVMCacheServesReads(t *testing.T) {
-	c, fake := newCacheTestClient(t, nil,
+	c, fake := newCacheTestClient(t,
 		testVM("ns", "vm-a", map[string]string{"redfish-enabled": "true"}),
 		testVM("ns", "vm-b", nil),
 	)
@@ -149,302 +144,40 @@ func TestVMCacheServesReads(t *testing.T) {
 	}
 }
 
-// fakeClock is the write tracker's clock in tests.
-type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func newFakeClock() *fakeClock { return &fakeClock{now: time.Unix(1_700_000_000, 0)} }
-
-func (f *fakeClock) Now() time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.now
-}
-
-func (f *fakeClock) Advance(d time.Duration) {
-	f.mu.Lock()
-	f.now = f.now.Add(d)
-	f.mu.Unlock()
-}
-
-func withRV(u *unstructured.Unstructured, rv string) *unstructured.Unstructured {
-	u.SetResourceVersion(rv)
-	return u
-}
-
-// newWriteTestClient returns a synced client over VMs vm-a and vm-b at
-// resourceVersion 1, with a fake clock and every API server GET failing, so
-// readsFromCache can tell a cached read from a direct one.
-func newWriteTestClient(t *testing.T) (*Client, *dynamicfake.FakeDynamicClient, *fakeClock) {
-	t.Helper()
-	c, fake := newCacheTestClient(t, nil,
-		withRV(testVM("ns", "vm-a", nil), "1"),
-		withRV(testVM("ns", "vm-b", nil), "1"),
-	)
-	clock := newFakeClock()
-	c.writes.now = clock.Now
-	c.restartVMCache([]string{"ns"})
-	t.Cleanup(c.stopVMCache)
-	waitSynced(t, c, "ns")
-	failGets(fake, "api server GET")
-	return c, fake, clock
-}
-
-func readsFromCache(c *Client, name string) bool {
-	_, err := c.getVMForRead("ns", name)
-	return err == nil || !strings.Contains(err.Error(), "api server GET")
-}
-
-// eventually polls cond, because informer event delivery is asynchronous
-// even over the fake client.
-func eventually(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting until %s", what)
-}
-
-// acceptUnseen makes the API server acknowledge a verb on VM name, answering
-// with resourceVersion rv, without storing anything. The informer never hears
-// of it: the state of a cache whose watch lags behind our write.
-func acceptUnseen(fake *dynamicfake.FakeDynamicClient, verb, name, rv string) {
-	fake.PrependReactor(verb, "virtualmachines", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		var actionName string
-		switch a := a.(type) {
-		case k8stesting.PatchAction:
-			actionName = a.GetName()
-		case k8stesting.DeleteAction:
-			actionName = a.GetName()
-		}
-		if actionName != name {
-			return false, nil, nil
-		}
-		if verb == "delete" {
-			return true, nil, nil
-		}
-		return true, withRV(testVM("ns", name, nil), rv), nil
-	})
-}
-
-func patchVM(t *testing.T, c *Client, name string) {
-	t.Helper()
-	if _, err := c.dynamicClient.Resource(vmGVR).Namespace("ns").Patch(context.Background(), name,
-		types.MergePatchType, []byte(`{"metadata":{"labels":{"x":"y"}}}`), metav1.PatchOptions{}); err != nil {
-		t.Fatalf("patch %s: %v", name, err)
-	}
-}
-
-func TestVMCacheBypassUntilOwnWriteIsObserved(t *testing.T) {
-	c, fake, clock := newWriteTestClient(t)
-	acceptUnseen(fake, "patch", "vm-a", "2")
-	patchVM(t, c, "vm-a")
-
-	if readsFromCache(c, "vm-a") {
-		t.Fatal("a read after our own write must bypass a cache that has not seen it")
-	}
-	if !readsFromCache(c, "vm-b") {
-		t.Fatal("reads of other VMs must still come from the cache")
-	}
-
-	// No fixed delay ends the bypass: while the cache lags, reads stay direct.
-	clock.Advance(writeBypassMax - time.Second)
-	if readsFromCache(c, "vm-a") {
-		t.Fatal("bypass ended before the cache saw our write")
-	}
-
-	if err := fake.Tracker().Update(vmGVR, withRV(testVM("ns", "vm-a", nil), "2"), "ns"); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "the cache serves vm-a once it holds our version", func() bool { return readsFromCache(c, "vm-a") })
-	vm, err := c.getVMForRead("ns", "vm-a")
-	if err != nil || vm.ResourceVersion != "2" {
-		t.Fatalf("cached read: rv=%v err=%v", vm, err)
-	}
-}
-
-func TestVMCacheBypassEndsWhenOwnWriteIsSuperseded(t *testing.T) {
-	c, fake, _ := newWriteTestClient(t)
-	acceptUnseen(fake, "patch", "vm-a", "2")
-	patchVM(t, c, "vm-a")
-
-	// The informer sees our version and then a newer one written by someone
-	// else. The cache never holds version 2 when we read, but it has seen it.
-	for _, rv := range []string{"2", "3"} {
-		if err := fake.Tracker().Update(vmGVR, withRV(testVM("ns", "vm-a", nil), rv), "ns"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	eventually(t, "the cache serves vm-a after seeing our version", func() bool { return readsFromCache(c, "vm-a") })
-	vm, err := c.getVMForRead("ns", "vm-a")
-	if err != nil || vm.ResourceVersion != "3" {
-		t.Fatalf("cached read: vm=%v err=%v", vm, err)
-	}
-}
-
-func TestVMCacheNoBypassWhenOwnWriteWasObservedBeforePatchReturned(t *testing.T) {
-	// On a real API server the watch event for our write can reach the
-	// informer before Patch returns, and virt-controller writes a newer status
-	// right after. The cache has seen our version before we record the write.
-	c, fake, _ := newWriteTestClient(t)
-	for _, rv := range []string{"2", "3"} {
-		if err := fake.Tracker().Update(vmGVR, withRV(testVM("ns", "vm-a", nil), rv), "ns"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Wait on the handler, not the store: the informer updates the store
-	// before it notifies handlers.
-	eventually(t, "the informer reported versions 2 and 3", func() bool {
-		c.writes.mu.Lock()
-		defer c.writes.mu.Unlock()
-		key := writeKey(vmGVR, "ns", "vm-a")
-		return c.writes.seenLocked(key, "2") && c.writes.seenLocked(key, "3")
-	})
-
-	acceptUnseen(fake, "patch", "vm-a", "2")
-	patchVM(t, c, "vm-a")
-	if !readsFromCache(c, "vm-a") {
-		t.Fatal("a write the cache saw before Patch returned must not bypass it")
-	}
-}
-
-func TestWriteTrackerForgetsDeletedObjects(t *testing.T) {
-	w := newWriteTracker()
-	w.observed(vmGVR, "ns", "vm-a", "2")
-	w.observed(vmiGVR, "ns", "vm-a", "5")
-	w.forget(vmiGVR, "ns", "vm-a")
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if _, ok := w.seen[writeKey(vmiGVR, "ns", "vm-a")]; ok {
-		t.Fatal("versions of a deleted object must be dropped")
-	}
-	if _, ok := w.seen[writeKey(vmGVR, "ns", "vm-a")]; !ok {
-		t.Fatal("versions of other objects must be kept")
-	}
-}
-
-func TestWriteTrackerSeenHistoryIsBounded(t *testing.T) {
-	w := newWriteTracker()
-	clock := newFakeClock()
-	w.now = clock.Now
-	for i := 0; i < 3*seenVersionsMax; i++ {
-		w.observed(vmGVR, "ns", "vm-a", fmt.Sprint(i))
-	}
-	w.mu.Lock()
-	n := len(w.seen[writeKey(vmGVR, "ns", "vm-a")])
-	w.mu.Unlock()
-	if n > seenVersionsMax {
-		t.Fatalf("kept %d versions, want at most %d", n, seenVersionsMax)
-	}
-
-	clock.Advance(writeBypassMax + time.Second)
-	w.observed(vmGVR, "ns", "vm-b", "1")
-	w.mu.Lock()
-	_, stale := w.seen[writeKey(vmGVR, "ns", "vm-a")]
-	w.mu.Unlock()
-	if stale {
-		t.Fatal("versions older than writeBypassMax must be pruned")
-	}
-}
-
-func TestVMCacheNoOpWriteDoesNotBypass(t *testing.T) {
-	// The API server does not bump resourceVersion or emit a watch event for
-	// a write that changes nothing; the cache already holds that version.
-	c, fake, _ := newWriteTestClient(t)
-	acceptUnseen(fake, "patch", "vm-a", "1")
-	patchVM(t, c, "vm-a")
-	if !readsFromCache(c, "vm-a") {
-		t.Fatal("a no-op write must not bypass a cache that already holds its version")
-	}
-}
-
-func TestVMCacheBypassIsBounded(t *testing.T) {
-	c, fake, clock := newWriteTestClient(t)
-	acceptUnseen(fake, "patch", "vm-a", "2")
-	patchVM(t, c, "vm-a")
-	clock.Advance(writeBypassMax + time.Second)
-	if !readsFromCache(c, "vm-a") {
-		t.Fatal("a write the cache never sees must stop forcing direct reads after writeBypassMax")
-	}
-	c.writes.mu.Lock()
-	n := len(c.writes.pending)
-	c.writes.mu.Unlock()
-	if n != 0 {
-		t.Fatalf("expired write still tracked: %d entries", n)
-	}
-}
-
-func TestVMCacheBypassAfterOwnDelete(t *testing.T) {
-	c, fake, _ := newWriteTestClient(t)
-	acceptUnseen(fake, "delete", "vm-a", "")
-	acceptUnseen(fake, "delete", "vm-b", "")
-	for _, name := range []string{"vm-a", "vm-b"} {
-		if err := c.dynamicClient.Resource(vmGVR).Namespace("ns").Delete(context.Background(), name, metav1.DeleteOptions{}); err != nil {
-			t.Fatal(err)
-		}
-		if readsFromCache(c, name) {
-			t.Fatalf("a read of %s after our delete must bypass a cache that still holds it", name)
-		}
-	}
-
-	// vm-a is removed outright; vm-b is held by a finalizer and only gains a
-	// deletionTimestamp. Either one shows the cache has seen the delete.
-	if err := fake.Tracker().Delete(vmGVR, "ns", "vm-a"); err != nil {
-		t.Fatal(err)
-	}
-	terminating := withRV(testVM("ns", "vm-b", nil), "2")
-	now := metav1.Now()
-	terminating.SetDeletionTimestamp(&now)
-	if err := fake.Tracker().Update(vmGVR, terminating, "ns"); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "the cache answers NotFound for vm-a", func() bool {
-		_, err := c.getVMForRead("ns", "vm-a")
-		return apierrors.IsNotFound(err)
-	})
-	eventually(t, "the cache serves the terminating vm-b", func() bool { return readsFromCache(c, "vm-b") })
-}
-
-func TestVMCacheFailedWriteDoesNotBypass(t *testing.T) {
-	c, fake, _ := newWriteTestClient(t)
-	fake.PrependReactor("patch", "virtualmachines", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, errors.New("patch rejected")
-	})
-	if _, err := c.dynamicClient.Resource(vmGVR).Namespace("ns").Patch(context.Background(), "vm-a",
-		types.MergePatchType, []byte(`{}`), metav1.PatchOptions{}); err == nil {
-		t.Fatal("expected the patch to fail")
-	}
-	if !readsFromCache(c, "vm-a") {
-		t.Fatal("a failed write must not bypass the cache")
-	}
-}
-
-type cacheOff struct{}
-
-func (cacheOff) GetVMCacheEnabled() bool { return false }
-
-func TestVMCacheDisabledByConfig(t *testing.T) {
-	c, _ := newCacheTestClient(t, cacheOff{}, testVM("ns", "vm-a", nil))
+// The boot-device PATCH handler writes the VM and then reads it back to build
+// its response. That read-back must come from the API server, because the
+// watch event for the write may not have reached the cache yet.
+func TestGetVMBootOptionsLiveReadsAPIServer(t *testing.T) {
+	c, fake := newCacheTestClient(t, withBootTarget(testVM("ns", "vm-a", nil), "Hdd"))
 	c.restartVMCache([]string{"ns"})
 	defer c.stopVMCache()
-	if c.currentVMCache() != nil {
-		t.Fatal("cache must not start when disabled by config")
+	waitSynced(t, c, "ns")
+
+	// The API server holds a newer version the watch has not delivered.
+	live := withBootTarget(testVM("ns", "vm-a", nil), "Cd")
+	fake.PrependReactor("get", "virtualmachines", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, live, nil
+	})
+
+	cached, err := c.GetVMBootOptions("ns", "vm-a")
+	if err != nil {
+		t.Fatalf("cached boot options: %v", err)
 	}
-	vm, err := c.getVMForRead("ns", "vm-a")
-	if err != nil || vm.Name != "vm-a" {
-		t.Fatalf("direct read with cache disabled: vm=%v err=%v", vm, err)
+	if cached["bootSourceOverrideTarget"] != "Hdd" {
+		t.Fatalf("cached read should still hold the old target, got %v", cached["bootSourceOverrideTarget"])
+	}
+
+	fresh, err := c.GetVMBootOptionsLive("ns", "vm-a")
+	if err != nil {
+		t.Fatalf("live boot options: %v", err)
+	}
+	if fresh["bootSourceOverrideTarget"] != "Cd" {
+		t.Fatalf("live read must come from the API server, got %v", fresh["bootSourceOverrideTarget"])
 	}
 }
 
 func TestVMCacheRestartAndStop(t *testing.T) {
-	c, _ := newCacheTestClient(t, nil, testVM("ns1", "a", nil), testVM("ns2", "b", nil))
+	c, _ := newCacheTestClient(t, testVM("ns1", "a", nil), testVM("ns2", "b", nil))
 	c.restartVMCache([]string{"ns1"})
 	waitSynced(t, c, "ns1")
 	if _, ok := c.currentVMCache().informer(vmGVR, "ns2"); ok {
@@ -464,6 +197,17 @@ func TestVMCacheRestartAndStop(t *testing.T) {
 	if _, err := c.getVMForRead("ns2", "b"); err != nil {
 		t.Fatalf("direct read after stop: %v", err)
 	}
+}
+
+// A client built without a dynamic client, as the server tests do, must not
+// start a cache or panic.
+func TestVMCacheWithoutDynamicClient(t *testing.T) {
+	c := &Client{}
+	c.restartVMCache([]string{"ns"})
+	if c.currentVMCache() != nil {
+		t.Fatal("cache must not start without a dynamic client")
+	}
+	c.stopVMCache()
 }
 
 func TestFilterVMNames(t *testing.T) {
