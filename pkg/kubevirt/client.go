@@ -98,10 +98,9 @@ type Client struct {
 	pvcWatcherCancel context.CancelFunc
 	pvcWatcherWg     sync.WaitGroup
 
-	// Read-only VM/VMI cache and the write tracker that keeps it honest (cache.go)
+	// Read-only VM/VMI informer cache (cache.go)
 	cacheMu sync.RWMutex
 	vmCache *vmCache
-	writes  *writeTracker
 }
 
 // init registers KubeVirt and CDI types with the runtime scheme for conversion
@@ -236,17 +235,13 @@ func NewClient(configPath string, timeout time.Duration, appConfig interface{}) 
 		},
 	}
 
-	// Every VM/VMI write goes through the tracker so cached reads can skip
-	// the cache right after this process wrote the object (see cache.go).
-	writes := newWriteTracker()
 	return &Client{
 		kubernetesClient: kubernetesClient,
-		dynamicClient:    newTrackingDynamicClient(dynamicClient, writes),
+		dynamicClient:    dynamicClient,
 		config:           config,
 		timeout:          timeout,
 		appConfig:        appConfig,
 		httpClient:       httpClient,
-		writes:           writes,
 	}, nil
 }
 
@@ -258,11 +253,9 @@ func NewClientWithClients(
 	timeout time.Duration,
 	appConfig interface{},
 ) *Client {
-	writes := newWriteTracker()
 	return &Client{
 		kubernetesClient: kubernetesClient,
-		dynamicClient:    newTrackingDynamicClient(dynamicClient, writes),
-		writes:           writes,
+		dynamicClient:    dynamicClient,
 		timeout:          timeout,
 		appConfig:        appConfig,
 		config:           &rest.Config{},
@@ -1389,7 +1382,21 @@ func (c *Client) GetVMBootOptions(namespace, name string) (map[string]interface{
 	if err != nil {
 		return nil, err
 	}
+	return bootOptionsFromVM(vm), nil
+}
 
+// GetVMBootOptionsLive is GetVMBootOptions read from the API server instead of
+// the cache. The boot-device PATCH handler uses it to build its response from
+// the VM it has just written, which the cache may not reflect yet.
+func (c *Client) GetVMBootOptionsLive(namespace, name string) (map[string]interface{}, error) {
+	vm, err := c.GetVM(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	return bootOptionsFromVM(vm), nil
+}
+
+func bootOptionsFromVM(vm *kubevirtv1.VirtualMachine) map[string]interface{} {
 	bootOptions := map[string]interface{}{
 		"bootSourceOverrideEnabled": "Disabled",
 		"bootSourceOverrideTarget":  "None",
@@ -1418,7 +1425,7 @@ func (c *Client) GetVMBootOptions(namespace, name string) (map[string]interface{
 		}
 	}
 
-	return bootOptions, nil
+	return bootOptions
 }
 
 // RecordVMBootOptionsAsAnnotations stores the boot options of a VirtualMachine

@@ -1322,7 +1322,7 @@ func (s *Server) handleBootUpdate(w http.ResponseWriter, r *http.Request, system
 	}
 
 	// Get updated boot options to return in response
-	bootOptions, err := s.kubevirtClient.GetVMBootOptions(namespace, vmName)
+	bootOptions, err := s.kubevirtClient.GetVMBootOptionsLive(namespace, vmName)
 	if err != nil {
 		logger.Error("Failed to get updated boot options for VM %s: %v", vmName, err)
 		bootOptions = map[string]interface{}{

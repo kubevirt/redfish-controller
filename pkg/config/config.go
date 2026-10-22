@@ -50,7 +50,6 @@
 //	kubevirt:
 //	  api_version: "v1"
 //	  timeout: 30
-//	  cache_enabled: true
 package config
 
 import (
@@ -184,9 +183,6 @@ type KubeVirtConfig struct {
 	APIVersion       string `mapstructure:"api_version"`
 	Timeout          int    `mapstructure:"timeout"`
 	AllowInsecureTLS bool   `mapstructure:"allow_insecure_tls"`
-	// CacheEnabled serves read-only VM/VMI lookups from an informer cache
-	// instead of the API server. On by default; see pkg/kubevirt/cache.go.
-	CacheEnabled bool `mapstructure:"cache_enabled"`
 }
 
 // CDIConfig holds CDI (Containerized Data Importer) configuration parameters.
@@ -301,7 +297,6 @@ func setDefaults() {
 	viper.SetDefault("kubevirt.api_version", "v1")
 	viper.SetDefault("kubevirt.timeout", 30)
 	viper.SetDefault("kubevirt.allow_insecure_tls", false)
-	viper.SetDefault("kubevirt.cache_enabled", true)
 	viper.SetDefault("datavolume.storage_size", "10Gi")
 	viper.SetDefault("datavolume.allow_insecure_tls", false)
 	viper.SetDefault("datavolume.vm_update_timeout", "30s")
@@ -679,13 +674,6 @@ func (c *Config) GetChassisForUser(username string) ([]*ChassisConfig, error) {
 	return nil, fmt.Errorf("user not found: %s", username)
 }
 
-// GetVMCacheEnabled reports whether read-only VM/VMI lookups may be served
-// from the informer cache. Discovered by the kubevirt client the same way as
-// GetDataVolumeConfig.
-func (c *Config) GetVMCacheEnabled() bool {
-	return c.KubeVirt.CacheEnabled
-}
-
 // GetDataVolumeConfig returns the DataVolume configuration settings.
 // This provides a safe way to access DataVolume settings without reflection.
 func (c *Config) GetDataVolumeConfig() (storageSize string, allowInsecureTLS bool, storageClass string, vmUpdateTimeout string, isoDownloadTimeout string, helperImage string) {
@@ -751,7 +739,6 @@ authentication:
 kubevirt:
   api_version: "v1"  # KubeVirt API version to use
   timeout: 30        # Timeout in seconds for KubeVirt operations
-  cache_enabled: true  # Serve read-only VM/VMI lookups from an informer cache
 
 # DataVolume Configuration
 # ------------------------
