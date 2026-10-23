@@ -44,7 +44,10 @@ package auth
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,20 +94,26 @@ type SecurityMetrics struct {
 // EnhancedMiddleware represents the enhanced authentication middleware.
 // It provides advanced security features while maintaining backward compatibility.
 type EnhancedMiddleware struct {
-	config          *config.Config
-	rateLimits      map[string]*RateLimitInfo // IP -> rate limit info
-	userRateLimits  map[string]*RateLimitInfo // username -> rate limit info
-	securityEvents  []SecurityEvent           // Audit trail
-	metrics         SecurityMetrics           // Security metrics
-	mutex           sync.RWMutex              // Thread safety
-	maxEvents       int                       // Maximum events to keep in memory
-	rateLimitWindow time.Duration             // Rate limit window
-	maxAttempts     int                       // Maximum attempts per window
-	blockDuration   time.Duration             // Block duration after max attempts
+	config           *config.Config
+	rateLimits       map[string]*RateLimitInfo // IP -> rate limit info
+	userRateLimits   map[string]*RateLimitInfo // username -> rate limit info
+	securityEvents   []SecurityEvent           // Audit trail
+	metrics          SecurityMetrics           // Security metrics
+	mutex            sync.RWMutex              // Thread safety
+	maxEvents        int                       // Maximum events to keep in memory
+	rateLimitWindow  time.Duration             // Rate limit window
+	maxAttempts      int                       // Maximum attempts per window
+	blockDuration    time.Duration             // Block duration after max attempts
+	rateLimitEnabled bool                      // Whether brute-force protection is active (on by default)
 }
 
 // NewEnhancedMiddleware creates a new enhanced authentication middleware instance.
-// It initializes the middleware with advanced security features and monitoring.
+// It initializes it with advanced security features and monitoring.
+//
+// Brute-force rate limiting is configured from authentication.rate_limiting
+// and is enabled unless explicitly disabled there. Deployments where the
+// cluster reverse proxy already rate-limits authentication attempts can turn
+// it off with authentication.rate_limiting.enabled: false.
 //
 // Parameters:
 // - config: Application configuration containing user and chassis information
@@ -112,16 +121,72 @@ type EnhancedMiddleware struct {
 // Returns:
 // - *EnhancedMiddleware: Initialized enhanced authentication middleware
 func NewEnhancedMiddleware(config *config.Config) *EnhancedMiddleware {
-	return &EnhancedMiddleware{
-		config:          config,
-		rateLimits:      make(map[string]*RateLimitInfo),
-		userRateLimits:  make(map[string]*RateLimitInfo),
-		securityEvents:  make([]SecurityEvent, 0),
-		maxEvents:       1000, // Keep last 1000 security events
-		rateLimitWindow: 5 * time.Minute,
-		maxAttempts:     10, // Max 10 attempts per 5 minutes
-		blockDuration:   15 * time.Minute,
+	m := &EnhancedMiddleware{
+		config:           config,
+		rateLimits:       make(map[string]*RateLimitInfo),
+		userRateLimits:   make(map[string]*RateLimitInfo),
+		securityEvents:   make([]SecurityEvent, 0),
+		maxEvents:        1000, // Keep last 1000 security events
+		rateLimitWindow:  5 * time.Minute,
+		maxAttempts:      10, // Max 10 attempts per 5 minutes
+		blockDuration:    15 * time.Minute,
+		rateLimitEnabled: true, // Enabled unless explicitly disabled
 	}
+
+	if config != nil {
+		m.ApplyRateLimitConfig(config.Auth.RateLimiting)
+	}
+
+	return m
+}
+
+// ApplyRateLimitConfig updates the brute-force protection settings, for
+// example when the configuration is hot-reloaded. The update is synchronized
+// with the limiter's reads, so it takes effect immediately. Zero values and a
+// nil Enabled keep the current setting.
+//
+// Parameters:
+// - rl: The rate limiting configuration to apply
+func (m *EnhancedMiddleware) ApplyRateLimitConfig(rl config.RateLimitingConfig) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if rl.MaxAttempts > 0 {
+		m.maxAttempts = rl.MaxAttempts
+	}
+	if rl.Window > 0 {
+		m.rateLimitWindow = rl.Window
+	}
+	if rl.BlockDuration > 0 {
+		m.blockDuration = rl.BlockDuration
+	}
+	if rl.Enabled != nil {
+		m.rateLimitEnabled = *rl.Enabled
+	}
+}
+
+// rateLimitingActive reports whether brute-force protection is enabled.
+// Synchronized with runtime configuration updates.
+func (m *EnhancedMiddleware) rateLimitingActive() bool {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	return m.rateLimitEnabled
+}
+
+// RateLimitSettings returns the currently effective rate limiting settings.
+// Useful for observability and for verifying configuration reloads.
+//
+// Returns:
+// - enabled: Whether brute-force protection is active
+// - maxAttempts: Maximum failed attempts per window
+// - window: Rate limit counting window
+// - blockDuration: How long a blocked address stays blocked
+func (m *EnhancedMiddleware) RateLimitSettings() (enabled bool, maxAttempts int, window, blockDuration time.Duration) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	return m.rateLimitEnabled, m.maxAttempts, m.rateLimitWindow, m.blockDuration
 }
 
 // Authenticate is the enhanced middleware function that performs authentication.
@@ -169,8 +234,9 @@ func (m *EnhancedMiddleware) Authenticate(handler http.HandlerFunc) http.Handler
 			return
 		}
 
-		// Check rate limiting before authentication
-		if m.isRateLimited(clientIP, correlationID) {
+		// Check rate limiting before authentication (enabled by default;
+		// can be disabled for deployments where the reverse proxy handles it)
+		if m.rateLimitingActive() && m.isRateLimited(clientIP, correlationID) {
 			m.logSecurityEvent(SecurityEvent{
 				Timestamp:     time.Now(),
 				EventType:     "rate_limit_exceeded",
@@ -183,7 +249,7 @@ func (m *EnhancedMiddleware) Authenticate(handler http.HandlerFunc) http.Handler
 				CorrelationID: correlationID,
 			})
 
-			m.sendRateLimitResponse(w, "Too many authentication attempts")
+			m.sendRateLimitResponse(w, "Too many authentication attempts", m.remainingBlockTime(clientIP))
 			return
 		}
 
@@ -210,7 +276,9 @@ func (m *EnhancedMiddleware) Authenticate(handler http.HandlerFunc) http.Handler
 			})
 
 			// Update rate limiting
-			m.updateRateLimit(clientIP, false)
+			if m.rateLimitingActive() {
+				m.updateRateLimit(clientIP, false)
+			}
 
 			m.sendUnauthorizedResponse(w, "Authentication failed")
 			return
@@ -250,7 +318,9 @@ func (m *EnhancedMiddleware) Authenticate(handler http.HandlerFunc) http.Handler
 		})
 
 		// Update rate limiting (successful login)
-		m.updateRateLimit(clientIP, true)
+		if m.rateLimitingActive() {
+			m.updateRateLimit(clientIP, true)
+		}
 
 		// Create authentication context
 		authCtx := &AuthContext{
@@ -361,8 +431,15 @@ func (m *EnhancedMiddleware) maskPassword(password string) string {
 	return "********"
 }
 
-// getClientIP extracts the real client IP address from the request.
-// It handles proxy headers and various deployment scenarios.
+// getClientIP extracts the client IP address for rate limiting and audit logs.
+//
+// X-Forwarded-For is a list "<client>, <proxy1>, ..., <proxyN>" where every
+// proxy appends the address it received the request from. Only the LAST entry
+// is appended by the trusted reverse proxy directly in front of this server
+// (e.g. the OpenShift router); all earlier entries are client-controlled and
+// must never be trusted, otherwise an attacker rotates fake entries to dodge
+// brute-force protection. When no X-Forwarded-For header is present the
+// connection address is used.
 //
 // Parameters:
 // - r: HTTP request
@@ -370,28 +447,17 @@ func (m *EnhancedMiddleware) maskPassword(password string) string {
 // Returns:
 // - string: Client IP address
 func (m *EnhancedMiddleware) getClientIP(r *http.Request) string {
-	// Check for proxy headers
-	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		// X-Forwarded-For can contain multiple IPs, take the first one
-		if commaIndex := strings.Index(ip, ","); commaIndex != -1 {
-			return strings.TrimSpace(ip[:commaIndex])
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		ips := strings.Split(xff, ",")
+		last := strings.TrimSpace(ips[len(ips)-1])
+		if last != "" {
+			return last
 		}
-		return strings.TrimSpace(ip)
 	}
 
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
-		return strings.TrimSpace(ip)
-	}
-
-	if ip := r.Header.Get("X-Client-IP"); ip != "" {
-		return strings.TrimSpace(ip)
-	}
-
-	// Fall back to remote address
 	if r.RemoteAddr != "" {
-		// Remove port if present
-		if colonIndex := strings.LastIndex(r.RemoteAddr, ":"); colonIndex != -1 {
-			return r.RemoteAddr[:colonIndex]
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			return host
 		}
 		return r.RemoteAddr
 	}
@@ -539,15 +605,44 @@ func (m *EnhancedMiddleware) logSecurityEvent(event SecurityEvent) {
 	})
 }
 
+// remainingBlockTime returns how much longer clientIP stays blocked, or 0
+// when it is not blocked. Synchronized with runtime configuration updates.
+//
+// Parameters:
+// - clientIP: Client IP address
+//
+// Returns:
+// - time.Duration: Remaining block time
+func (m *EnhancedMiddleware) remainingBlockTime(clientIP string) time.Duration {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	info, exists := m.rateLimits[clientIP]
+	if !exists {
+		return 0
+	}
+	if remaining := time.Until(info.BlockedUntil); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
 // sendRateLimitResponse sends an HTTP 429 Too Many Requests response.
-// It provides a standardized error response for rate limiting.
+// The Retry-After header is derived from the remaining block time, rounded
+// up to whole seconds, so clients neither retry while still blocked nor
+// wait longer than necessary.
 //
 // Parameters:
 // - w: HTTP response writer
 // - message: Error message to include in response
-func (m *EnhancedMiddleware) sendRateLimitResponse(w http.ResponseWriter, message string) {
+// - retryAfter: Remaining time before the client may retry
+func (m *EnhancedMiddleware) sendRateLimitResponse(w http.ResponseWriter, message string, retryAfter time.Duration) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Retry-After", "900") // 15 minutes
+	retryAfterSeconds := int64(math.Ceil(retryAfter.Seconds()))
+	if retryAfterSeconds < 1 {
+		retryAfterSeconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds, 10))
 	w.WriteHeader(http.StatusTooManyRequests)
 
 	errorResponse := fmt.Sprintf(`{

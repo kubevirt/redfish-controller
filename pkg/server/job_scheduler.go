@@ -336,25 +336,8 @@ func (js *JobScheduler) Stop() {
 
 // AddDefaultJobs adds common background jobs for the Redfish API
 func (js *JobScheduler) AddDefaultJobs(server *Server) error {
-	// Cache cleanup job
-	err := js.AddJob(
-		"cache-cleanup",
-		"Cache Cleanup",
-		10*time.Minute, // Every 10 minutes
-		func() error {
-			if server.responseCache != nil {
-				// Trigger cache cleanup
-				server.responseCache.cleanupExpired()
-			}
-			return nil
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to add cache cleanup job: %w", err)
-	}
-
 	// Task cleanup job
-	err = js.AddJob(
+	err := js.AddJob(
 		"task-cleanup",
 		"Task Cleanup",
 		1*time.Hour, // Every hour

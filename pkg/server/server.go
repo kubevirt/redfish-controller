@@ -74,26 +74,20 @@ type Server struct {
 	config                 *config.Config
 	kubevirtClient         *kubevirt.Client
 	enhancedAuthMiddleware *auth.EnhancedMiddleware // Enhanced authentication
-	securityHandlers       *SecurityHandlers        // Security monitoring endpoints
 	httpServer             *http.Server
 	taskManager            *TaskManager
 	useEnhancedAuth        bool // Flag to enable enhanced authentication
 	jobScheduler           *JobScheduler
-	memoryManager          *MemoryManager
 	connectionManager      *ConnectionManager
 	memoryMonitor          *MemoryMonitor
-	advancedCache          *AdvancedCache
-	responseOptimizer      *ResponseOptimizer
-	responseCacheOptimizer *ResponseCacheOptimizer
 	circuitBreakerManager  *CircuitBreakerManager
 	retryManager           *RetryManager
 	rateLimitManager       *RateLimitManager
 	healthChecker          *HealthChecker
 	selfHealingManager     *SelfHealingManager
 
-	startTime     time.Time    // Added for uptime calculation
-	responseCache *Cache       // Response cache for performance optimization
-	configMutex   sync.RWMutex // Protects config for hot-reload
+	startTime   time.Time    // Added for uptime calculation
+	configMutex sync.RWMutex // Protects config for hot-reload
 }
 
 // NewServer creates a new HTTP server instance.
@@ -109,17 +103,10 @@ func NewServer(config *config.Config, kubevirtClient *kubevirt.Client) *Server {
 	// Initialize enhanced authentication middleware
 	enhancedAuthMiddleware := auth.NewEnhancedMiddleware(config)
 
-	// Initialize security handlers
-	securityHandlers := NewSecurityHandlers(enhancedAuthMiddleware)
-
 	var taskManager *TaskManager
 	var jobScheduler *JobScheduler
-	var memoryManager *MemoryManager
 	var connectionManager *ConnectionManager
 	var memoryMonitor *MemoryMonitor
-	var advancedCache *AdvancedCache
-	var responseOptimizer *ResponseOptimizer
-	var responseCacheOptimizer *ResponseCacheOptimizer
 	var circuitBreakerManager *CircuitBreakerManager
 	var retryManager *RetryManager
 	var rateLimitManager *RateLimitManager
@@ -134,23 +121,11 @@ func NewServer(config *config.Config, kubevirtClient *kubevirt.Client) *Server {
 		// Initialize job scheduler
 		jobScheduler = NewJobScheduler()
 
-		// Initialize memory manager
-		memoryManager = NewMemoryManager()
-
 		// Initialize connection manager
 		connectionManager = NewConnectionManager()
 
 		// Initialize memory monitor
 		memoryMonitor = NewMemoryMonitor()
-
-		// Initialize advanced cache
-		advancedCache = NewAdvancedCache()
-
-		// Initialize response optimizer
-		responseOptimizer = NewResponseOptimizer()
-
-		// Initialize response cache optimizer
-		responseCacheOptimizer = NewResponseCacheOptimizer()
 
 		// Initialize circuit breaker manager
 		circuitBreakerManager = NewCircuitBreakerManager()
@@ -170,34 +145,22 @@ func NewServer(config *config.Config, kubevirtClient *kubevirt.Client) *Server {
 		logger.Info("Test mode enabled - skipping background component initialization")
 	}
 
-	// Initialize response cache (skip in test mode)
-	var responseCache *Cache
-	if !config.Server.TestMode {
-		responseCache = NewCache(1000, 5*time.Minute) // 1000 entries, 5 minute default TTL
-	}
-
 	server := &Server{
 		config:                 config,
 		kubevirtClient:         kubevirtClient,
 		enhancedAuthMiddleware: enhancedAuthMiddleware,
-		securityHandlers:       securityHandlers,
 		taskManager:            taskManager,
 		useEnhancedAuth:        true, // Enable enhanced authentication
 		jobScheduler:           jobScheduler,
-		memoryManager:          memoryManager,
 		connectionManager:      connectionManager,
 		memoryMonitor:          memoryMonitor,
-		advancedCache:          advancedCache,
-		responseOptimizer:      responseOptimizer,
-		responseCacheOptimizer: responseCacheOptimizer,
 		circuitBreakerManager:  circuitBreakerManager,
 		retryManager:           retryManager,
 		rateLimitManager:       rateLimitManager,
 		healthChecker:          healthChecker,
 		selfHealingManager:     selfHealingManager,
 
-		startTime:     time.Now(), // Initialize start time
-		responseCache: responseCache,
+		startTime: time.Now(), // Initialize start time
 	}
 
 	// Add default background jobs (skip in test mode)
@@ -264,11 +227,6 @@ func (s *Server) Shutdown() error {
 			s.jobScheduler.Stop()
 		}
 
-		// Stop the memory manager
-		if s.memoryManager != nil {
-			s.memoryManager.Stop()
-		}
-
 		// Stop the connection manager
 		if s.connectionManager != nil {
 			s.connectionManager.Stop()
@@ -277,21 +235,6 @@ func (s *Server) Shutdown() error {
 		// Stop the memory monitor
 		if s.memoryMonitor != nil {
 			s.memoryMonitor.Stop()
-		}
-
-		// Stop the response cache
-		if s.responseCache != nil {
-			s.responseCache.Stop()
-		}
-
-		// Stop the advanced cache
-		if s.advancedCache != nil {
-			s.advancedCache.Stop()
-		}
-
-		// Stop the response cache optimizer
-		if s.responseCacheOptimizer != nil {
-			s.responseCacheOptimizer.Stop()
 		}
 
 		// Stop the circuit breaker manager
@@ -357,6 +300,10 @@ func (s *Server) UpdateConfig(newConfig *config.Config) {
 	s.config = newConfig
 	s.configMutex.Unlock()
 
+	// Apply the new rate limiting settings to the authentication middleware
+	// so hot-reloads take effect without a restart
+	s.enhancedAuthMiddleware.ApplyRateLimitConfig(newConfig.Auth.RateLimiting)
+
 	logger.Info("Configuration hot-reloaded successfully")
 
 	if !newConfig.Server.TestMode && s.kubevirtClient != nil {
@@ -386,123 +333,67 @@ func (s *Server) startWatchers() {
 func (s *Server) createMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Register security monitoring endpoints
-	s.securityHandlers.RegisterSecurityHandlers(mux)
-
-	// Apply middleware chain: Logging -> Security -> Performance -> Compression -> Cache -> Authentication -> Handler
+	// Apply middleware chain: Logging -> Authentication -> Handler
 	// Service root endpoint
 	mux.Handle("/redfish/v1/",
 		LoggingMiddleware(
-			SecurityMiddleware(
-				PerformanceMiddleware(
-					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleServiceRoot),
-						),
-					),
-				),
-			),
+			s.getAuthMiddleware().Authenticate(s.handleServiceRoot),
 		),
 	)
 
 	// Chassis collection endpoint
 	mux.Handle("/redfish/v1/Chassis",
 		LoggingMiddleware(
-			SecurityMiddleware(
-				PerformanceMiddleware(
-					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleChassisCollection),
-						),
-					),
-				),
-			),
+			s.getAuthMiddleware().Authenticate(s.handleChassisCollection),
 		),
 	)
 
 	// Individual chassis endpoint
 	mux.Handle("/redfish/v1/Chassis/",
 		LoggingMiddleware(
-			SecurityMiddleware(
-				PerformanceMiddleware(
-					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleChassis),
-						),
-					),
-				),
-			),
+			s.getAuthMiddleware().Authenticate(s.handleChassis),
 		),
 	)
 
 	// Systems collection endpoint
 	mux.Handle("/redfish/v1/Systems",
 		LoggingMiddleware(
-			SecurityMiddleware(
-				PerformanceMiddleware(
-					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleSystemsCollection),
-						),
-					),
-				),
-			),
+			s.getAuthMiddleware().Authenticate(s.handleSystemsCollection),
 		),
 	)
 
 	// Individual system endpoint (handles both system and virtual media requests)
 	mux.Handle("/redfish/v1/Systems/",
 		LoggingMiddleware(
-			SecurityMiddleware(
-				PerformanceMiddleware(
-					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleSystem),
-						),
-					),
-				),
-			),
+			s.getAuthMiddleware().Authenticate(s.handleSystem),
 		),
 	)
 
-	// Managers endpoint
+	// Managers collection endpoint
+	mux.Handle("/redfish/v1/Managers",
+		LoggingMiddleware(
+			s.getAuthMiddleware().Authenticate(s.handleManagerCollection),
+		),
+	)
+
+	// Individual managers endpoint
 	mux.Handle("/redfish/v1/Managers/",
 		LoggingMiddleware(
-			SecurityMiddleware(
-				PerformanceMiddleware(
-					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleManager),
-						),
-					),
-				),
-			),
+			s.getAuthMiddleware().Authenticate(s.handleManager),
 		),
 	)
 
-	// Task endpoints (no caching for dynamic content)
+	// Task endpoints
 	mux.Handle("/redfish/v1/TaskService/Tasks/",
 		LoggingMiddleware(
-			SecurityMiddleware(
-				PerformanceMiddleware(
-					CompressionMiddleware(
-						s.getAuthMiddleware().Authenticate(s.handleTask),
-					),
-				),
-			),
+			s.getAuthMiddleware().Authenticate(s.handleTask),
 		),
 	)
 
-	// Performance metrics endpoint (internal use, no caching)
+	// Performance metrics endpoint (internal use)
 	mux.Handle("/internal/metrics",
 		LoggingMiddleware(
-			SecurityMiddleware(
-				PerformanceMiddleware(
-					CompressionMiddleware(
-						s.getAuthMiddleware().Authenticate(s.handleMetrics),
-					),
-				),
-			),
+			s.getAuthMiddleware().Authenticate(s.handleMetrics),
 		),
 	)
 
@@ -569,7 +460,7 @@ func (s *Server) handleServiceRoot(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	s.sendOptimizedJSON(w, r, serviceRoot)
+	s.encodeJSONResponse(w, serviceRoot)
 }
 
 // handleChassisCollection handles the chassis collection endpoint.
@@ -608,8 +499,8 @@ func (s *Server) handleChassisCollection(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Set appropriate cache headers for collections
-	s.setCacheHeaders(w, "collection")
-	s.sendOptimizedJSON(w, r, collection)
+	s.setNoCacheHeaders(w)
+	s.encodeJSONResponse(w, collection)
 }
 
 // handleChassis handles individual chassis endpoints.
@@ -695,7 +586,7 @@ func (s *Server) handleChassis(w http.ResponseWriter, r *http.Request) {
 	// Return the resource with proper Redfish headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", chassis.OdataEtag)
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, chassis)
 }
 
@@ -750,8 +641,8 @@ func (s *Server) handleSystemsCollection(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Set appropriate cache headers for collections
-	s.setCacheHeaders(w, "collection")
-	s.sendOptimizedJSON(w, r, collection)
+	s.setNoCacheHeaders(w)
+	s.encodeJSONResponse(w, collection)
 }
 
 // handleSystem handles individual system (VM) endpoints.
@@ -898,7 +789,7 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	// Return the resource with proper Redfish headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", system.OdataEtag)
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, system)
 }
 
@@ -1015,7 +906,7 @@ func (s *Server) handleVirtualMediaCollection(w http.ResponseWriter, r *http.Req
 	}
 
 	// Set appropriate cache headers for collections
-	s.setCacheHeaders(w, "collection")
+	s.setNoCacheHeaders(w)
 	s.sendJSON(w, collection)
 }
 
@@ -1073,7 +964,7 @@ func (s *Server) handleGetVirtualMedia(w http.ResponseWriter, r *http.Request, s
 	// Return the resource with proper Redfish headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", virtualMedia.OdataEtag)
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, virtualMedia)
 }
 
@@ -1154,13 +1045,8 @@ func (s *Server) handleInsertVirtualMedia(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	s.setCacheHeaders(w, "action")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, redfishTask)
-
-	// Invalidate related cache entries after virtual media insertion
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s/VirtualMedia", systemName))
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s", systemName))
-	logger.Debug("Invalidated cache for system %s virtual media after insertion", systemName)
 }
 
 // handleEjectVirtualMedia handles POST requests to eject virtual media.
@@ -1196,7 +1082,7 @@ func (s *Server) handleEjectVirtualMedia(w http.ResponseWriter, r *http.Request,
 	// Return success response with proper Redfish format
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	s.setCacheHeaders(w, "action")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, map[string]interface{}{
 		"@odata.context": "/redfish/v1/$metadata#ActionResponse.ActionResponse",
 		"@odata.type":    "#ActionResponse.v1_0_0.ActionResponse",
@@ -1213,11 +1099,6 @@ func (s *Server) handleEjectVirtualMedia(w http.ResponseWriter, r *http.Request,
 			},
 		},
 	})
-
-	// Invalidate related cache entries after virtual media ejection
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s/VirtualMedia", systemName))
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s", systemName))
-	logger.Debug("Invalidated cache for system %s virtual media after ejection", systemName)
 }
 
 // handleBootUpdate handles PATCH requests to update boot configuration.
@@ -1412,14 +1293,50 @@ func (s *Server) handleBootUpdate(w http.ResponseWriter, r *http.Request, system
 	// Return the updated resource with proper headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", system.OdataEtag)
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	w.WriteHeader(http.StatusOK)
 	s.encodeJSONResponse(w, system)
+}
 
-	// Invalidate related cache entries
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s", systemName))
-	s.responseCache.Invalidate("Systems") // Invalidate systems collection
-	logger.Debug("Invalidated cache for system %s after boot update", systemName)
+// handleManagerCollection handles the managers collection endpoint.
+// It returns links to the managers (one per chassis) the user can access.
+//
+// Parameters:
+// - w: HTTP response writer
+// - r: HTTP request
+func (s *Server) handleManagerCollection(w http.ResponseWriter, r *http.Request) {
+	// Validate HTTP method
+	if !s.validateMethod(w, r, []string{"GET"}) {
+		return
+	}
+
+	user := auth.GetUser(r)
+	cfg := s.currentConfig()
+
+	// Build the member links from the user's accessible chassis, skipping
+	// chassis that are no longer configured so no link dangles
+	var members []redfish.Link
+	for _, chassisName := range user.Chassis {
+		if _, err := cfg.GetChassisByName(chassisName); err != nil {
+			continue
+		}
+		members = append(members, redfish.Link{
+			OdataID: fmt.Sprintf("/redfish/v1/Managers/%s", chassisName),
+		})
+	}
+
+	collection := redfish.ManagerCollection{
+		OdataContext: "/redfish/v1/$metadata#ManagerCollection.ManagerCollection",
+		OdataID:      "/redfish/v1/Managers",
+		OdataType:    "#ManagerCollection.ManagerCollection",
+		Name:         "Manager Collection",
+		Members:      members,
+		MembersCount: len(members),
+	}
+
+	// Set appropriate cache headers for collections
+	s.setNoCacheHeaders(w)
+	s.encodeJSONResponse(w, collection)
 }
 
 // handleManager handles individual manager endpoints.
@@ -1447,29 +1364,35 @@ func (s *Server) handleManager(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user and their accessible systems
-	user := auth.GetUser(r)
 	cfg := s.currentConfig()
+
+	// A manager maps to a configured chassis; unknown manager IDs do not exist
+	chassisCfg, err := cfg.GetChassisByName(managerID)
+	if err != nil {
+		s.sendNotFound(w, "Manager not found")
+		return
+	}
+
+	// Check if the user has access to the chassis this manager manages
+	if !auth.HasChassisAccess(r, managerID) {
+		s.sendForbidden(w, "Access denied to chassis")
+		return
+	}
+
+	// The manager represents exactly this chassis, so ManagerForSystems
+	// lists only its systems, even when the user can access other chassis
+	vms, err := s.kubevirtClient.ListVMsWithSelector(chassisCfg.Namespace, chassisCfg.VMSelector)
+	if err != nil {
+		logger.Error("Failed to list VMs for chassis %s: %v", managerID, err)
+		vms = []string{}
+	}
+
 	var managerForSystems []map[string]string
-
-	// Build dynamic ManagerForSystems links based on user's accessible chassis
-	for _, chassisName := range user.Chassis {
-		chassisCfg, err := cfg.GetChassisByName(chassisName)
-		if err != nil {
-			continue
-		}
-
-		vms, err := s.kubevirtClient.ListVMsWithSelector(chassisCfg.Namespace, chassisCfg.VMSelector)
-		if err != nil {
-			logger.Error("Failed to list VMs for chassis %s: %v", chassisName, err)
-			continue
-		}
-
-		for _, vmName := range vms {
-			managerForSystems = append(managerForSystems, map[string]string{
-				"@odata.id": fmt.Sprintf("/redfish/v1/Systems/%s", vmName),
-			})
-		}
+	for _, vmName := range vms {
+		systemID := config.GenerateSystemID(cfg.SystemIDConvention, chassisCfg.Namespace, vmName)
+		managerForSystems = append(managerForSystems, map[string]string{
+			"@odata.id": fmt.Sprintf("/redfish/v1/Systems/%s", systemID),
+		})
 	}
 
 	// Return a basic manager resource
@@ -1493,7 +1416,7 @@ func (s *Server) handleManager(w http.ResponseWriter, r *http.Request) {
 	// Return the manager resource with proper headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", manager["@odata.etag"].(string))
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, manager)
 }
 
@@ -1542,7 +1465,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	// Return the task resource with proper headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", redfishTask.OdataEtag)
-	s.setCacheHeaders(w, "task")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, redfishTask)
 }
 
@@ -1610,7 +1533,7 @@ func (s *Server) handlePowerAction(w http.ResponseWriter, r *http.Request, syste
 		responseSystemID := config.GenerateSystemID(cfg.SystemIDConvention, namespace, vmName)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		s.setCacheHeaders(w, "action")
+		s.setNoCacheHeaders(w)
 		s.encodeJSONResponse(w, map[string]interface{}{
 			"@odata.context": "/redfish/v1/$metadata#ActionResponse.ActionResponse",
 			"@odata.type":    "#ActionResponse.v1_0_0.ActionResponse",
@@ -1645,7 +1568,7 @@ func (s *Server) handlePowerAction(w http.ResponseWriter, r *http.Request, syste
 	// Return success response with proper Redfish format
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	s.setCacheHeaders(w, "action")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, map[string]interface{}{
 		"@odata.context": "/redfish/v1/$metadata#ActionResponse.ActionResponse",
 		"@odata.type":    "#ActionResponse.v1_0_0.ActionResponse",
@@ -1663,10 +1586,7 @@ func (s *Server) handlePowerAction(w http.ResponseWriter, r *http.Request, syste
 		},
 	})
 
-	// Invalidate related cache entries after power state change
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s", responseSystemID))
-	s.responseCache.Invalidate("Systems") // Invalidate systems collection
-	logger.Debug("Invalidated cache for system %s after power action %s", systemName, resetRequest.ResetType)
+	logger.Debug("Power action %s executed for system %s", resetRequest.ResetType, systemName)
 }
 
 // handleMetrics handles the performance metrics endpoint
@@ -1684,17 +1604,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Get performance metrics from KubeVirt client
 	metrics := s.kubevirtClient.GetPerformanceMetrics()
 
-	// Get cache statistics
-	cacheStats := s.responseCache.GetStats()
-
 	// Get task manager statistics
 	taskManagerStats := s.taskManager.GetStats()
 
 	// Get job scheduler statistics
 	schedulerStats := s.jobScheduler.GetStats()
-
-	// Get memory manager statistics
-	memoryStats := s.memoryManager.GetStats()
 
 	// Get connection manager statistics
 	connectionStats := s.connectionManager.GetStats()
@@ -1702,15 +1616,6 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Get memory monitor statistics
 	memoryMonitorStats := s.memoryMonitor.GetStats()
 	memoryAlerts := s.memoryMonitor.GetAlerts()
-
-	// Get advanced cache statistics
-	advancedCacheStats := s.advancedCache.GetStats()
-
-	// Get response optimizer statistics
-	responseOptimizerStats := s.responseOptimizer.GetStats()
-
-	// Get response cache optimizer statistics
-	responseCacheOptimizerStats := s.responseCacheOptimizer.GetStats()
 
 	// Get circuit breaker statistics
 	circuitBreakerStats := s.circuitBreakerManager.GetStats()
@@ -1729,21 +1634,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"server": map[string]interface{}{
 			"uptime": time.Since(s.startTime).String(),
 		},
-		"kubevirt_client":          metrics,
-		"response_cache":           cacheStats,
-		"task_manager":             taskManagerStats,
-		"job_scheduler":            schedulerStats,
-		"memory_manager":           memoryStats,
-		"connection_manager":       connectionStats,
-		"memory_monitor":           memoryMonitorStats,
-		"memory_alerts":            memoryAlerts,
-		"advanced_cache":           advancedCacheStats,
-		"response_optimizer":       responseOptimizerStats,
-		"response_cache_optimizer": responseCacheOptimizerStats,
-		"circuit_breakers":         circuitBreakerStats,
-		"retry_mechanisms":         retryStats,
-		"rate_limiters":            rateLimitStats,
-		"health_checker":           healthStats,
+		"kubevirt_client":    metrics,
+		"task_manager":       taskManagerStats,
+		"job_scheduler":      schedulerStats,
+		"connection_manager": connectionStats,
+		"memory_monitor":     memoryMonitorStats,
+		"memory_alerts":      memoryAlerts,
+		"circuit_breakers":   circuitBreakerStats,
+		"retry_mechanisms":   retryStats,
+		"rate_limiters":      rateLimitStats,
+		"health_checker":     healthStats,
 	}
 
 	// Return metrics with no-cache headers
@@ -1807,83 +1707,14 @@ func (s *Server) sendJSON(w http.ResponseWriter, data interface{}) {
 	s.encodeJSONResponse(w, data)
 }
 
-// sendOptimizedJSON sends a JSON response with optimized serialization.
-// It uses the memory manager for pooled resources and response optimizer for compression.
+// setNoCacheHeaders marks the response as not cacheable.
+// Redfish responses are filtered per user (chassis access), so neither
+// shared caches nor local caches must store and reuse them.
 //
 // Parameters:
 // - w: HTTP response writer
-// - r: HTTP request (for compression negotiation)
-// - data: Data to serialize as JSON
-func (s *Server) sendOptimizedJSON(w http.ResponseWriter, r *http.Request, data interface{}) {
-	// Set content type header
-	w.Header().Set("Content-Type", "application/json")
-
-	// In test mode, use standard JSON marshaling
-	if s.currentConfig().Server.TestMode || s.memoryManager == nil {
-		jsonData, err := json.Marshal(data)
-		if err != nil {
-			logger.Error("Failed to marshal JSON response: %v", err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
-		if _, err := w.Write(jsonData); err != nil {
-			logger.Error("Failed to write JSON response: %v", err)
-		}
-		return
-	}
-
-	// Use optimized JSON marshaling from memory manager
-	jsonData, err := s.memoryManager.OptimizedJSONMarshal(data)
-	if err != nil {
-		logger.Error("Failed to marshal JSON response: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
-	// Use response optimizer for compression
-	if s.responseOptimizer != nil {
-		if err := s.responseOptimizer.OptimizeResponse(w, r, jsonData); err != nil {
-			logger.Error("Failed to optimize response: %v", err)
-			// Fallback to uncompressed response
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
-			if _, err := w.Write(jsonData); err != nil {
-				logger.Error("Failed to write fallback JSON response: %v", err)
-			}
-		}
-	} else {
-		// Fallback to uncompressed response
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
-		if _, err := w.Write(jsonData); err != nil {
-			logger.Error("Failed to write uncompressed JSON response: %v", err)
-		}
-	}
-}
-
-// setCacheHeaders sets appropriate Cache-Control headers based on resource type.
-// It helps clients understand how to cache different types of resources.
-//
-// Parameters:
-// - w: HTTP response writer
-// - resourceType: Type of resource (e.g., "collection", "resource", "task")
-func (s *Server) setCacheHeaders(w http.ResponseWriter, resourceType string) {
-	switch resourceType {
-	case "collection":
-		// Collections can be cached for a short time
-		w.Header().Set("Cache-Control", "public, max-age=30")
-	case "resource":
-		// Individual resources can be cached longer but should revalidate
-		w.Header().Set("Cache-Control", "public, max-age=300, must-revalidate")
-	case "task":
-		// Tasks should not be cached as they change frequently
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	case "action":
-		// Action responses should not be cached
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	default:
-		// Default: moderate caching with revalidation
-		w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
-	}
+func (s *Server) setNoCacheHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 }
 
 // sendRedfishError sends a Redfish error response with proper logging
@@ -2035,44 +1866,11 @@ func (s *Server) sendConflictError(w http.ResponseWriter, resource, details stri
 	s.sendRedfishError(w, nil, err)
 }
 
-// sendJSONResponse sends a JSON response with proper headers and status code.
-// It uses the memory manager for optimized JSON marshaling.
-func (s *Server) sendJSONResponse(w http.ResponseWriter, statusCode int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-
-	// In test mode, use standard JSON marshaling
-	if s.currentConfig().Server.TestMode || s.memoryManager == nil {
-		jsonData, err := json.Marshal(data)
-		if err != nil {
-			logger.Error("Failed to marshal JSON response: %v", err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
-		w.WriteHeader(statusCode)
-		if _, err := w.Write(jsonData); err != nil {
-			logger.Error("Failed to write JSON response: %v", err)
-		}
-		return
-	}
-
-	// Use optimized JSON marshaling from memory manager
-	jsonData, err := s.memoryManager.OptimizedJSONMarshal(data)
-	if err != nil {
-		logger.Error("Failed to marshal JSON response: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
-	w.WriteHeader(statusCode)
-	if _, err := w.Write(jsonData); err != nil {
-		logger.Error("Failed to write optimized JSON response: %v", err)
-	}
-}
-
 // encodeJSONResponse safely encodes JSON data to the response writer
 func (s *Server) encodeJSONResponse(w http.ResponseWriter, data interface{}) {
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		logger.Error("Failed to encode JSON response: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
