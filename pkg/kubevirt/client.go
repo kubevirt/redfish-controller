@@ -97,6 +97,10 @@ type Client struct {
 	pvcWatcherCtx    context.Context
 	pvcWatcherCancel context.CancelFunc
 	pvcWatcherWg     sync.WaitGroup
+
+	// Read-only VM/VMI informer cache (cache.go)
+	cacheMu sync.RWMutex
+	vmCache *vmCache
 }
 
 // init registers KubeVirt and CDI types with the runtime scheme for conversion
@@ -310,6 +314,7 @@ func (c *Client) Close() error {
 	c.stopBootOnceWatcher()
 	c.stopImportPodWatcher()
 	c.stopCDIPVCWatcher()
+	c.stopVMCache()
 
 	if c.httpClient != nil && c.httpClient.Transport != nil {
 		if transport, ok := c.httpClient.Transport.(*http.Transport); ok {
@@ -328,6 +333,7 @@ func (c *Client) RestartWatchers(ctx context.Context, namespaces []string) {
 	c.StartBootOnceWatcher(ctx, namespaces)
 	c.StartImportPodWatcher(ctx, namespaces)
 	c.StartCDIPVCWatcher(ctx, namespaces)
+	c.restartVMCache(namespaces)
 }
 
 // retryWithBackoff executes a function with exponential backoff retry logic
@@ -462,9 +468,9 @@ func (c *Client) ListVMsWithSelector(namespace string, vmSelector *VMSelectorCon
 	}
 
 	// Build list options with label selector if provided
-	listOptions := metav1.ListOptions{}
+	selector := labels.Everything()
 	if vmSelector != nil && len(vmSelector.Labels) > 0 {
-		selector := labels.NewSelector()
+		selector = labels.NewSelector()
 		for key, value := range vmSelector.Labels {
 			req, err := labels.NewRequirement(key, selection.Equals, []string{value})
 			if err != nil {
@@ -473,33 +479,30 @@ func (c *Client) ListVMsWithSelector(namespace string, vmSelector *VMSelectorCon
 			}
 			selector = selector.Add(*req)
 		}
-		listOptions.LabelSelector = selector.String()
 		logger.Debug("Using label selector: %s", selector.String())
 	}
 
-	vms, err := c.dynamicClient.Resource(gvr).Namespace(namespace).List(ctx, listOptions)
-	if err != nil {
-		logger.Error("Failed to list VMs in namespace %s: %v", namespace, err)
-		return nil, fmt.Errorf("failed to list VMs: %w", err)
-	}
-
-	var vmNames []string
-	for _, vm := range vms.Items {
-		vmName := vm.GetName()
-
-		// If explicit names are specified, only include those VMs
-		if vmSelector != nil && len(vmSelector.Names) > 0 {
-			for _, allowedName := range vmSelector.Names {
-				if vmName == allowedName {
-					vmNames = append(vmNames, vmName)
-					break
-				}
-			}
-		} else {
-			// Include all VMs if no explicit names specified
-			vmNames = append(vmNames, vmName)
+	// Serve from the informer cache when it is synced for this namespace;
+	// otherwise list from the API server.
+	names, ok := c.listVMNamesFromCache(namespace, selector)
+	if !ok {
+		listOptions := metav1.ListOptions{}
+		if !selector.Empty() {
+			listOptions.LabelSelector = selector.String()
+		}
+		vms, err := c.dynamicClient.Resource(gvr).Namespace(namespace).List(ctx, listOptions)
+		if err != nil {
+			logger.Error("Failed to list VMs in namespace %s: %v", namespace, err)
+			return nil, fmt.Errorf("failed to list VMs: %w", err)
+		}
+		names = make([]string, 0, len(vms.Items))
+		for _, vm := range vms.Items {
+			names = append(names, vm.GetName())
 		}
 	}
+
+	// If explicit names are specified, only include those VMs
+	vmNames := filterVMNames(names, vmSelector)
 
 	logger.Info("Found %d VMs in namespace %s with selector: %v", len(vmNames), namespace, vmNames)
 	return vmNames, nil
@@ -645,7 +648,7 @@ func (c *Client) GetVMPowerState(namespace, name string) (string, error) {
 	}
 
 	// Fetch the VM resource using typed API
-	vm, err := c.GetVM(namespace, name)
+	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		return "Unknown", fmt.Errorf("failed to get VM %s: %w", name, err)
 	}
@@ -685,7 +688,7 @@ func (c *Client) GetVMPowerState(namespace, name string) (string, error) {
 	}
 
 	// Fallback to VMI phase logic
-	vmi, err := c.GetVMI(namespace, name)
+	vmi, err := c.getVMIForRead(namespace, name)
 	if err != nil {
 		// If VMI doesn't exist, VM is stopped
 		return "Off", nil
@@ -1337,7 +1340,7 @@ func (c *Client) GetVMNetworkInterfaces(namespace, name string) ([]string, error
 		return nil, fmt.Errorf("dynamic client is not initialized")
 	}
 
-	vmi, err := c.GetVMI(namespace, name)
+	vmi, err := c.getVMIForRead(namespace, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VMI %s: %w", name, err)
 	}
@@ -1354,7 +1357,7 @@ func (c *Client) GetVMNetworkInterfaces(namespace, name string) ([]string, error
 
 // GetVMStorage gets storage information of a VirtualMachine
 func (c *Client) GetVMStorage(namespace, name string) ([]string, error) {
-	vm, err := c.GetVM(namespace, name)
+	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -1375,11 +1378,25 @@ func (c *Client) GetVMStorage(namespace, name string) ([]string, error) {
 
 // GetVMBootOptions gets boot options of a VirtualMachine
 func (c *Client) GetVMBootOptions(namespace, name string) (map[string]interface{}, error) {
+	vm, err := c.getVMForRead(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	return bootOptionsFromVM(vm), nil
+}
+
+// GetVMBootOptionsLive is GetVMBootOptions read from the API server instead of
+// the cache. The boot-device PATCH handler uses it to build its response from
+// the VM it has just written, which the cache may not reflect yet.
+func (c *Client) GetVMBootOptionsLive(namespace, name string) (map[string]interface{}, error) {
 	vm, err := c.GetVM(namespace, name)
 	if err != nil {
 		return nil, err
 	}
+	return bootOptionsFromVM(vm), nil
+}
 
+func bootOptionsFromVM(vm *kubevirtv1.VirtualMachine) map[string]interface{} {
 	bootOptions := map[string]interface{}{
 		"bootSourceOverrideEnabled": "Disabled",
 		"bootSourceOverrideTarget":  "None",
@@ -1408,7 +1425,7 @@ func (c *Client) GetVMBootOptions(namespace, name string) (map[string]interface{
 		}
 	}
 
-	return bootOptions, nil
+	return bootOptions
 }
 
 // RecordVMBootOptionsAsAnnotations stores the boot options of a VirtualMachine
@@ -1477,7 +1494,7 @@ func (c *Client) RecordVMBootOptionsAsAnnotations(namespace, name string, option
 
 // GetVMVirtualMedia gets virtual media information of a VirtualMachine
 func (c *Client) GetVMVirtualMedia(namespace, name string) ([]string, error) {
-	vm, err := c.GetVM(namespace, name)
+	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VM %s: %w", name, err)
 	}
@@ -1503,7 +1520,7 @@ func (c *Client) GetVMVirtualMedia(namespace, name string) ([]string, error) {
 
 // IsVirtualMediaInserted checks if a specific virtual media device has media inserted and ready
 func (c *Client) IsVirtualMediaInserted(namespace, name, mediaID string) (bool, error) {
-	vm, err := c.GetVM(namespace, name)
+	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		return false, fmt.Errorf("failed to get VM %s: %w", name, err)
 	}
@@ -2627,7 +2644,7 @@ func (c *Client) GetNamespaceInfo(namespace string) (*corev1.Namespace, error) {
 
 // GetVMMemory gets memory information of a VirtualMachine
 func (c *Client) GetVMMemory(namespace, name string) (float64, error) {
-	vm, err := c.GetVM(namespace, name)
+	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		logger.Warning("Failed to get VM %s/%s for memory lookup: %v", namespace, name, err)
 		return 2.0, nil // Low default fallback
@@ -2665,7 +2682,7 @@ func (c *Client) GetVMMemory(namespace, name string) (float64, error) {
 
 // GetVMCPU gets CPU information of a VirtualMachine
 func (c *Client) GetVMCPU(namespace, name string) (int, error) {
-	vm, err := c.GetVM(namespace, name)
+	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		logger.Warning("Failed to get VM %s/%s for CPU lookup: %v", namespace, name, err)
 		return 1, nil // Low default fallback
@@ -2689,7 +2706,7 @@ func (c *Client) GetVMCPU(namespace, name string) (int, error) {
 
 // GetVMStorageDetails gets detailed storage information of a VirtualMachine
 func (c *Client) GetVMStorageDetails(namespace, name string) (map[string]interface{}, error) {
-	vm, err := c.GetVM(namespace, name)
+	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -2741,7 +2758,7 @@ func (c *Client) GetVMStorageDetails(namespace, name string) (map[string]interfa
 
 // GetVMNetworkDetails gets detailed network information of a VirtualMachine
 func (c *Client) GetVMNetworkDetails(namespace, name string) ([]map[string]interface{}, error) {
-	vm, err := c.GetVM(namespace, name)
+	vm, err := c.getVMForRead(namespace, name)
 	if err != nil {
 		return nil, err
 	}
