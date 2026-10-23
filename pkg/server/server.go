@@ -74,7 +74,6 @@ type Server struct {
 	config                 *config.Config
 	kubevirtClient         *kubevirt.Client
 	enhancedAuthMiddleware *auth.EnhancedMiddleware // Enhanced authentication
-	securityHandlers       *SecurityHandlers        // Security monitoring endpoints
 	httpServer             *http.Server
 	taskManager            *TaskManager
 	useEnhancedAuth        bool // Flag to enable enhanced authentication
@@ -108,9 +107,6 @@ type Server struct {
 func NewServer(config *config.Config, kubevirtClient *kubevirt.Client) *Server {
 	// Initialize enhanced authentication middleware
 	enhancedAuthMiddleware := auth.NewEnhancedMiddleware(config)
-
-	// Initialize security handlers
-	securityHandlers := NewSecurityHandlers(enhancedAuthMiddleware)
 
 	var taskManager *TaskManager
 	var jobScheduler *JobScheduler
@@ -180,7 +176,6 @@ func NewServer(config *config.Config, kubevirtClient *kubevirt.Client) *Server {
 		config:                 config,
 		kubevirtClient:         kubevirtClient,
 		enhancedAuthMiddleware: enhancedAuthMiddleware,
-		securityHandlers:       securityHandlers,
 		taskManager:            taskManager,
 		useEnhancedAuth:        true, // Enable enhanced authentication
 		jobScheduler:           jobScheduler,
@@ -385,9 +380,6 @@ func (s *Server) startWatchers() {
 // - *http.ServeMux: Configured HTTP multiplexer with all endpoints
 func (s *Server) createMux() *http.ServeMux {
 	mux := http.NewServeMux()
-
-	// Register security monitoring endpoints
-	s.securityHandlers.RegisterSecurityHandlers(mux)
 
 	// Apply middleware chain: Logging -> Security -> Performance -> Compression -> Cache -> Authentication -> Handler
 	// Service root endpoint

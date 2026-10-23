@@ -80,7 +80,6 @@ func TestNewServer(t *testing.T) {
 	assert.Equal(t, testConfig, server.config)
 	assert.Equal(t, mockClient, server.kubevirtClient)
 	assert.NotNil(t, server.enhancedAuthMiddleware)
-	assert.NotNil(t, server.securityHandlers)
 	assert.NotNil(t, server.taskManager)
 	assert.NotNil(t, server.jobScheduler)
 	assert.NotNil(t, server.memoryManager)
