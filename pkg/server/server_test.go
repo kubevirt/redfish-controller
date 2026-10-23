@@ -80,21 +80,15 @@ func TestNewServer(t *testing.T) {
 	assert.Equal(t, testConfig, server.config)
 	assert.Equal(t, mockClient, server.kubevirtClient)
 	assert.NotNil(t, server.enhancedAuthMiddleware)
-	assert.NotNil(t, server.securityHandlers)
 	assert.NotNil(t, server.taskManager)
 	assert.NotNil(t, server.jobScheduler)
-	assert.NotNil(t, server.memoryManager)
 	assert.NotNil(t, server.connectionManager)
 	assert.NotNil(t, server.memoryMonitor)
-	assert.NotNil(t, server.advancedCache)
-	assert.NotNil(t, server.responseOptimizer)
-	assert.NotNil(t, server.responseCacheOptimizer)
 	assert.NotNil(t, server.circuitBreakerManager)
 	assert.NotNil(t, server.retryManager)
 	assert.NotNil(t, server.rateLimitManager)
 	assert.NotNil(t, server.healthChecker)
 	assert.NotNil(t, server.selfHealingManager)
-	assert.NotNil(t, server.responseCache)
 	assert.True(t, server.useEnhancedAuth)
 	assert.False(t, server.startTime.IsZero())
 }
@@ -299,8 +293,8 @@ func TestServerSendJSON(t *testing.T) {
 	assert.Equal(t, float64(200), response["code"])
 }
 
-// TestServerSendOptimizedJSON tests the sendOptimizedJSON method
-func TestServerSendOptimizedJSON(t *testing.T) {
+// TestServerEncodeJSONResponse tests the encodeJSONResponse method
+func TestServerEncodeJSONResponse(t *testing.T) {
 	server := testServer(t)
 
 	tests := []struct {
@@ -328,7 +322,7 @@ func TestServerSendOptimizedJSON(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 
-			server.sendOptimizedJSON(w, req, tt.testData)
+			server.encodeJSONResponse(w, tt.testData)
 
 			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -342,47 +336,78 @@ func TestServerSendOptimizedJSON(t *testing.T) {
 }
 
 // TestServerSetCacheHeaders tests the setCacheHeaders method
-func TestServerSetCacheHeaders(t *testing.T) {
+// TestServerSetNoCacheHeaders verifies that responses carrying user-specific
+// (chassis-filtered) data are marked as not cacheable, so no shared cache may
+// store and serve them to a different user.
+func TestServerSetNoCacheHeaders(t *testing.T) {
 	server := testServer(t)
 
-	tests := []struct {
-		name         string
-		resourceType string
-		expected     string
-	}{
-		{
-			name:         "collection",
-			resourceType: "collection",
-			expected:     "public, max-age=30",
+	w := httptest.NewRecorder()
+	server.setNoCacheHeaders(w)
+
+	assert.Equal(t, "no-cache, no-store, must-revalidate", w.Header().Get("Cache-Control"))
+}
+
+// TestServerCollectionsNotCacheable is a regression test: collection and
+// resource responses are filtered per user and must not advertise caching.
+func TestServerCollectionsNotCacheable(t *testing.T) {
+	mockDynamic := kubevirt.NewMockDynamicClient()
+	fakeK8s := fake.NewSimpleClientset()
+	client := kubevirt.NewClientWithClients(fakeK8s, mockDynamic, 30*time.Second, nil)
+
+	cfg := &config.Config{
+		Server:             config.ServerConfig{Host: "localhost", Port: 8080, TestMode: true},
+		SystemIDConvention: "enhanced",
+		Auth: config.AuthConfig{
+			Users: []config.UserConfig{
+				{Username: "user", Password: config.PasswordConfig{Plain: "pass"}, Chassis: []string{"chassis-a"}},
+			},
 		},
-		{
-			name:         "resource",
-			resourceType: "resource",
-			expected:     "public, max-age=300, must-revalidate",
-		},
-		{
-			name:         "task",
-			resourceType: "task",
-			expected:     "no-cache, no-store, must-revalidate",
-		},
-		{
-			name:         "action",
-			resourceType: "action",
-			expected:     "no-cache, no-store, must-revalidate",
-		},
-		{
-			name:         "default",
-			resourceType: "unknown",
-			expected:     "public, max-age=60, must-revalidate",
+		Chassis: []config.ChassisConfig{
+			{
+				Name:      "chassis-a",
+				Namespace: "ns-a",
+				VMSelector: &kubevirt.VMSelectorConfig{
+					Labels: map[string]string{"redfish-enabled": "true"},
+				},
+			},
 		},
 	}
+	server := NewServer(cfg, client)
 
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"Chassis collection", "/redfish/v1/Chassis"},
+		{"Chassis resource", "/redfish/v1/Chassis/chassis-a"},
+		{"Managers collection", "/redfish/v1/Managers"},
+		{"Manager resource", "/redfish/v1/Managers/chassis-a"},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			server.setCacheHeaders(w, tt.resourceType)
+			req := httptest.NewRequest("GET", tt.path, nil)
+			user := &auth.User{Username: "user", Chassis: []string{"chassis-a"}}
+			authCtx := &auth.AuthContext{User: user, Chassis: ""}
+			ctx := logger.WithAuth(req.Context(), authCtx)
+			req = req.WithContext(ctx)
 
-			assert.Equal(t, tt.expected, w.Header().Get("Cache-Control"))
+			w := httptest.NewRecorder()
+
+			switch tt.name {
+			case "Chassis collection":
+				server.handleChassisCollection(w, req)
+			case "Chassis resource":
+				server.handleChassis(w, req)
+			case "Managers collection":
+				server.handleManagerCollection(w, req)
+			case "Manager resource":
+				server.handleManager(w, req)
+			}
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, "no-cache, no-store, must-revalidate", w.Header().Get("Cache-Control"))
+			assert.NotContains(t, w.Header().Get("Cache-Control"), "public")
 		})
 	}
 }
@@ -546,43 +571,6 @@ func TestServerSendConflictError(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&errorResponse)
 	assert.NoError(t, err)
 	assert.Contains(t, errorResponse.Error.Message, resource)
-}
-
-// TestServerSendJSONResponse tests the sendJSONResponse method
-func TestServerSendJSONResponse(t *testing.T) {
-	server := testServer(t)
-
-	tests := []struct {
-		name       string
-		statusCode int
-		data       interface{}
-	}{
-		{
-			name:       "success response",
-			statusCode: http.StatusOK,
-			data:       map[string]string{"status": "success"},
-		},
-		{
-			name:       "created response",
-			statusCode: http.StatusCreated,
-			data:       map[string]string{"id": "123"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-
-			server.sendJSONResponse(w, tt.statusCode, tt.data)
-
-			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
-			assert.Equal(t, tt.statusCode, w.Code)
-
-			var response map[string]interface{}
-			err := json.NewDecoder(w.Body).Decode(&response)
-			assert.NoError(t, err)
-		})
-	}
 }
 
 // TestServerGetAuthMiddleware tests the getAuthMiddleware method
@@ -877,38 +865,6 @@ func TestServerErrorHandling(t *testing.T) {
 	assert.NotEmpty(t, errorResponse.Error.Message)
 }
 
-// TestServerMemoryManagerIntegration tests integration with memory manager
-func TestServerMemoryManagerIntegration(t *testing.T) {
-	testConfig := &config.Config{
-		Server: config.ServerConfig{
-			Host: "localhost",
-			Port: 8080,
-		},
-	}
-
-	mockClient := &kubevirt.Client{}
-	server := NewServer(testConfig, mockClient)
-
-	// Test that memory manager is properly initialized
-	assert.NotNil(t, server.memoryManager)
-
-	// Test buffer allocation
-	buffer := server.memoryManager.GetBuffer()
-	assert.NotNil(t, buffer)
-	server.memoryManager.PutBuffer(buffer)
-
-	// Test encoder allocation
-	encoderBuffer := server.memoryManager.GetBuffer()
-	encoder := server.memoryManager.GetEncoder(encoderBuffer)
-	assert.NotNil(t, encoder)
-	server.memoryManager.PutEncoder(encoder)
-
-	// Test response allocation
-	response := server.memoryManager.GetResponse()
-	assert.NotNil(t, response)
-	server.memoryManager.PutResponse(response)
-}
-
 // TestServerStartTime tests that start time is properly initialized
 func TestServerStartTime(t *testing.T) {
 	testConfig := &config.Config{
@@ -1023,26 +979,17 @@ func testServerShutdown(t *testing.T, server *Server) {
 	case <-ctx.Done():
 		t.Log("Server shutdown timed out - forcing cleanup")
 		// Force cleanup by calling Stop() on all components directly
-		if server.memoryManager != nil {
-			server.memoryManager.Stop()
-		}
 		if server.connectionManager != nil {
 			server.connectionManager.Stop()
 		}
 		if server.memoryMonitor != nil {
 			server.memoryMonitor.Stop()
 		}
-		if server.advancedCache != nil {
-			server.advancedCache.Stop()
-		}
 		if server.healthChecker != nil {
 			server.healthChecker.Stop()
 		}
 		if server.selfHealingManager != nil {
 			server.selfHealingManager.Stop()
-		}
-		if server.responseCache != nil {
-			server.responseCache.Stop()
 		}
 		t.Log("Forced cleanup completed")
 	}
@@ -1343,7 +1290,7 @@ func TestHandleManager(t *testing.T) {
 
 	// Test 1: Valid GET request to manager
 	t.Run("Valid GET request", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/redfish/v1/Managers/manager1", nil)
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers/chassis1", nil)
 		req.Header.Set("Authorization", "Basic dGVzdHVzZXI6dGVzdHBhc3M=") // testuser:testpass
 
 		// Set up authentication context manually for testing
@@ -1372,7 +1319,7 @@ func TestHandleManager(t *testing.T) {
 		var response map[string]interface{}
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		assert.NoError(t, err)
-		assert.Equal(t, "manager1", response["Id"])
+		assert.Equal(t, "chassis1", response["Id"])
 		assert.Equal(t, "KubeVirt Manager", response["Name"])
 		assert.Equal(t, "#Manager.v1_0_0.Manager", response["@odata.type"])
 		assert.Equal(t, "Service", response["ManagerType"])
@@ -1380,6 +1327,42 @@ func TestHandleManager(t *testing.T) {
 		assert.Equal(t, "OK", response["Status"].(map[string]interface{})["Health"])
 		// ManagerForSystems should be empty due to nil KubeVirt client
 		assert.Empty(t, response["Links"].(map[string]interface{})["ManagerForSystems"])
+	})
+
+	// Test 1b: Manager ID that does not map to a configured chassis
+	t.Run("Unknown manager ID", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers/manager1", nil)
+
+		user := &auth.User{
+			Username: "testuser",
+			Chassis:  []string{"chassis1"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManager(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	// Test 1c: Manager for a chassis the user has no access to
+	t.Run("Foreign chassis manager", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers/chassis1", nil)
+
+		user := &auth.User{
+			Username: "noaccess",
+			Chassis:  []string{"other-chassis"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManager(w, req)
+
+		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 
 	// Test 2: Invalid path (too short)
@@ -1418,7 +1401,7 @@ func TestHandleManager(t *testing.T) {
 
 	// Test 4: Invalid HTTP method
 	t.Run("Invalid HTTP method", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/redfish/v1/Managers/manager1", nil)
+		req := httptest.NewRequest("POST", "/redfish/v1/Managers/chassis1", nil)
 		w := httptest.NewRecorder()
 
 		server.handleManager(w, req)
@@ -1431,6 +1414,336 @@ func TestHandleManager(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "Base.1.0.GeneralError", response["error"].(map[string]interface{})["code"])
 		assert.Contains(t, response["error"].(map[string]interface{})["message"], "Method POST not allowed")
+	})
+}
+
+// TestServerUpdateConfigRateLimiting verifies that hot-reloading the
+// configuration applies new rate limiting settings to the authentication
+// middleware, so changes take effect without a restart.
+func TestServerUpdateConfigRateLimiting(t *testing.T) {
+	base := func(rl config.RateLimitingConfig) *config.Config {
+		return &config.Config{
+			Server: config.ServerConfig{Host: "localhost", Port: 8080, TestMode: true},
+			Auth: config.AuthConfig{
+				Users: []config.UserConfig{
+					{
+						Username: "testuser",
+						Password: config.PasswordConfig{Plain: "testpass"},
+						Chassis:  []string{"chassis1"},
+					},
+				},
+				RateLimiting: rl,
+			},
+			Chassis: []config.ChassisConfig{
+				{
+					Name:      "chassis1",
+					Namespace: "default",
+				},
+			},
+		}
+	}
+
+	server := NewServer(base(config.RateLimitingConfig{Enabled: &[]bool{false}[0]}), &kubevirt.Client{})
+
+	if enabled, _, _, _ := server.enhancedAuthMiddleware.RateLimitSettings(); enabled {
+		t.Fatal("Rate limiting should start disabled")
+	}
+
+	// Hot-reload a different rate-limit configuration
+	server.UpdateConfig(base(config.RateLimitingConfig{
+		Enabled:       &[]bool{true}[0],
+		MaxAttempts:   2,
+		Window:        time.Minute,
+		BlockDuration: 30 * time.Second,
+	}))
+
+	mw := server.enhancedAuthMiddleware
+	enabled, maxAttempts, window, blockDuration := mw.RateLimitSettings()
+	if !enabled {
+		t.Error("Reload should enable rate limiting")
+	}
+	if maxAttempts != 2 {
+		t.Errorf("Expected maxAttempts 2 after reload, got %d", maxAttempts)
+	}
+	if window != time.Minute {
+		t.Errorf("Expected rateLimitWindow 1m after reload, got %v", window)
+	}
+	if blockDuration != 30*time.Second {
+		t.Errorf("Expected blockDuration 30s after reload, got %v", blockDuration)
+	}
+
+	// End-to-end: the reloaded limiter blocks and reports the new duration
+	handler := mw.Authenticate(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	doFailedAuth := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/redfish/v1/Chassis/chassis1", nil)
+		req.Header.Set("Authorization", "Basic d3Jvbmc6d3Jvbmc=") // wrong:wrong
+		w := httptest.NewRecorder()
+		handler(w, req)
+		return w
+	}
+
+	for i := 0; i < maxAttempts; i++ {
+		if w := doFailedAuth(); w.Code != http.StatusUnauthorized {
+			t.Fatalf("Attempt %d: expected 401, got %d", i+1, w.Code)
+		}
+	}
+
+	w := doFailedAuth()
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("Expected 429 after reload, got %d", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "30" {
+		t.Errorf("Expected Retry-After 30 after reload, got %s", got)
+	}
+}
+
+// TestHandleManager_SystemIDConvention verifies that the ManagerForSystems
+// links follow the configured system_id_convention.
+func TestHandleManager_SystemIDConvention(t *testing.T) {
+	tests := []struct {
+		name           string
+		convention     string
+		expectedLinkID string
+	}{
+		{
+			name:           "enhanced convention uses namespace-qualified IDs",
+			convention:     "enhanced",
+			expectedLinkID: "/redfish/v1/Systems/ns-a.test-vm",
+		},
+		{
+			name:           "legacy convention uses bare VM names",
+			convention:     "legacy",
+			expectedLinkID: "/redfish/v1/Systems/test-vm",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDynamic := kubevirt.NewMockDynamicClient()
+			fakeK8s := fake.NewSimpleClientset()
+			client := kubevirt.NewClientWithClients(fakeK8s, mockDynamic, 30*time.Second, nil)
+
+			vm := &kubevirtv1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vm",
+					Namespace: "ns-a",
+					Labels:    map[string]string{"redfish-enabled": "true"},
+				},
+				Spec: kubevirtv1.VirtualMachineSpec{},
+			}
+			if err := mockDynamic.AddVM(vm); err != nil {
+				t.Fatalf("Failed to add VM: %v", err)
+			}
+
+			cfg := &config.Config{
+				Server: config.ServerConfig{
+					Host:     "localhost",
+					Port:     8080,
+					TestMode: true,
+				},
+				SystemIDConvention: tt.convention,
+				Auth: config.AuthConfig{
+					Users: []config.UserConfig{
+						{Username: "user1", Password: config.PasswordConfig{Plain: "pass1"}, Chassis: []string{"chassis-a"}},
+					},
+				},
+				Chassis: []config.ChassisConfig{
+					{
+						Name:      "chassis-a",
+						Namespace: "ns-a",
+						VMSelector: &kubevirt.VMSelectorConfig{
+							Labels: map[string]string{"redfish-enabled": "true"},
+						},
+					},
+				},
+			}
+			server := NewServer(cfg, client)
+
+			req := httptest.NewRequest("GET", "/redfish/v1/Managers/chassis-a", nil)
+			user := &auth.User{Username: "user1", Chassis: []string{"chassis-a"}}
+			authCtx := &auth.AuthContext{User: user, Chassis: ""}
+			ctx := logger.WithAuth(req.Context(), authCtx)
+			req = req.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			server.handleManager(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+
+			var response map[string]interface{}
+			err := json.Unmarshal(w.Body.Bytes(), &response)
+			assert.NoError(t, err)
+
+			links := response["Links"].(map[string]interface{})["ManagerForSystems"].([]interface{})
+			assert.Len(t, links, 1)
+			assert.Equal(t, tt.expectedLinkID, links[0].(map[string]interface{})["@odata.id"])
+		})
+	}
+}
+
+// TestHandleManager_ManagerForSystemsPerChassis is a regression test: a
+// manager represents a single chassis, so ManagerForSystems must list only
+// that chassis' systems even when the user can access several chassis.
+func TestHandleManager_ManagerForSystemsPerChassis(t *testing.T) {
+	mockDynamic := kubevirt.NewMockDynamicClient()
+	fakeK8s := fake.NewSimpleClientset()
+	client := kubevirt.NewClientWithClients(fakeK8s, mockDynamic, 30*time.Second, nil)
+
+	vmA := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vm-a",
+			Namespace: "ns-a",
+			Labels:    map[string]string{"redfish-enabled": "true"},
+		},
+		Spec: kubevirtv1.VirtualMachineSpec{},
+	}
+	vmB := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vm-b",
+			Namespace: "ns-b",
+			Labels:    map[string]string{"redfish-enabled": "true"},
+		},
+		Spec: kubevirtv1.VirtualMachineSpec{},
+	}
+	for _, vm := range []*kubevirtv1.VirtualMachine{vmA, vmB} {
+		if err := mockDynamic.AddVM(vm); err != nil {
+			t.Fatalf("Failed to add VM: %v", err)
+		}
+	}
+
+	cfg := &config.Config{
+		Server:             config.ServerConfig{Host: "localhost", Port: 8080, TestMode: true},
+		SystemIDConvention: "enhanced",
+		Auth: config.AuthConfig{
+			Users: []config.UserConfig{
+				{Username: "dual", Password: config.PasswordConfig{Plain: "pass"}, Chassis: []string{"chassis-a", "chassis-b"}},
+			},
+		},
+		Chassis: []config.ChassisConfig{
+			{
+				Name:      "chassis-a",
+				Namespace: "ns-a",
+				VMSelector: &kubevirt.VMSelectorConfig{
+					Labels: map[string]string{"redfish-enabled": "true"},
+				},
+			},
+			{
+				Name:      "chassis-b",
+				Namespace: "ns-b",
+				VMSelector: &kubevirt.VMSelectorConfig{
+					Labels: map[string]string{"redfish-enabled": "true"},
+				},
+			},
+		},
+	}
+	server := NewServer(cfg, client)
+
+	tests := []struct {
+		manager  string
+		expected []string
+	}{
+		{"chassis-a", []string{"/redfish/v1/Systems/ns-a.vm-a"}},
+		{"chassis-b", []string{"/redfish/v1/Systems/ns-b.vm-b"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.manager, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/redfish/v1/Managers/"+tt.manager, nil)
+			user := &auth.User{Username: "dual", Chassis: []string{"chassis-a", "chassis-b"}}
+			authCtx := &auth.AuthContext{User: user, Chassis: ""}
+			ctx := logger.WithAuth(req.Context(), authCtx)
+			req = req.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			server.handleManager(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+
+			var response map[string]interface{}
+			err := json.Unmarshal(w.Body.Bytes(), &response)
+			assert.NoError(t, err)
+
+			links := response["Links"].(map[string]interface{})["ManagerForSystems"].([]interface{})
+			ids := make([]string, 0, len(links))
+			for _, l := range links {
+				ids = append(ids, l.(map[string]interface{})["@odata.id"].(string))
+			}
+			assert.ElementsMatch(t, tt.expected, ids)
+		})
+	}
+}
+
+// TestHandleManagerCollection tests the handleManagerCollection HTTP handler
+func TestHandleManagerCollection(t *testing.T) {
+	server := testServer(t)
+
+	// Test 1: Valid GET request, user has access to chassis1
+	t.Run("Valid GET request", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers", nil)
+
+		user := &auth.User{
+			Username: "testuser",
+			Chassis:  []string{"chassis1"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManagerCollection(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var response redfish.ManagerCollection
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		assert.NoError(t, err)
+		assert.Equal(t, "Manager Collection", response.Name)
+		assert.Equal(t, 1, response.MembersCount)
+		assert.Len(t, response.Members, 1)
+		assert.Equal(t, "/redfish/v1/Managers/chassis1", response.Members[0].OdataID)
+	})
+
+	// Test 2: Unconfigured chassis in the user's ACL is not listed
+	t.Run("Skips unconfigured chassis", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers", nil)
+
+		user := &auth.User{
+			Username: "noaccess",
+			Chassis:  []string{"gone-chassis", "chassis1"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManagerCollection(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var response redfish.ManagerCollection
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, response.MembersCount)
+		assert.Equal(t, "/redfish/v1/Managers/chassis1", response.Members[0].OdataID)
+	})
+
+	// Test 3: Invalid HTTP method
+	t.Run("Invalid HTTP method", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/redfish/v1/Managers", nil)
+
+		user := &auth.User{
+			Username: "testuser",
+			Chassis:  []string{"chassis1"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManagerCollection(w, req)
+
+		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
 	})
 }
 
@@ -1924,16 +2237,11 @@ func TestHandleMetrics(t *testing.T) {
 		// Check that expected metrics sections exist
 		assert.Contains(t, response, "server")
 		assert.Contains(t, response, "kubevirt_client")
-		assert.Contains(t, response, "response_cache")
 		assert.Contains(t, response, "task_manager")
 		assert.Contains(t, response, "job_scheduler")
-		assert.Contains(t, response, "memory_manager")
 		assert.Contains(t, response, "connection_manager")
 		assert.Contains(t, response, "memory_monitor")
 		assert.Contains(t, response, "memory_alerts")
-		assert.Contains(t, response, "advanced_cache")
-		assert.Contains(t, response, "response_optimizer")
-		assert.Contains(t, response, "response_cache_optimizer")
 		assert.Contains(t, response, "circuit_breakers")
 		assert.Contains(t, response, "retry_mechanisms")
 		assert.Contains(t, response, "rate_limiters")

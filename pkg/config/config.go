@@ -112,9 +112,22 @@ type ChassisConfig struct {
 }
 
 // AuthConfig holds authentication configuration for Redfish API access.
-// It defines users and their access permissions to specific chassis.
+// It defines users, their access permissions to specific chassis, and optional
+// brute-force protection.
 type AuthConfig struct {
-	Users []UserConfig `mapstructure:"users"`
+	Users        []UserConfig       `mapstructure:"users"`
+	RateLimiting RateLimitingConfig `mapstructure:"rate_limiting"`
+}
+
+// RateLimitingConfig holds brute-force protection settings for the
+// authentication endpoint. Protection is enabled by default; set enabled to
+// false explicitly when the server sits behind a reverse proxy that already
+// rate-limits authentication attempts.
+type RateLimitingConfig struct {
+	Enabled       *bool         `mapstructure:"enabled"` // nil means enabled (default)
+	MaxAttempts   int           `mapstructure:"max_attempts"`
+	Window        time.Duration `mapstructure:"window"`
+	BlockDuration time.Duration `mapstructure:"block_duration"`
 }
 
 // UserConfig represents a Redfish user with authentication credentials and chassis access.
@@ -303,6 +316,9 @@ func setDefaults() {
 	viper.SetDefault("datavolume.iso_download_timeout", "30m")
 	viper.SetDefault("datavolume.helper_image", "registry.access.redhat.com/ubi8/ubi-minimal:latest")
 	viper.SetDefault("system_id_convention", "legacy") // Default to legacy for backward compatibility
+	viper.SetDefault("authentication.rate_limiting.max_attempts", 10)
+	viper.SetDefault("authentication.rate_limiting.window", "5m")
+	viper.SetDefault("authentication.rate_limiting.block_duration", "15m")
 }
 
 // validateConfig validates the configuration to ensure all required fields are present
@@ -724,6 +740,10 @@ chassis:
 # ---------------------------
 # Users define who can access the Redfish API and which chassis they can access.
 # Each user can be granted access to specific chassis for namespace isolation.
+#
+# Brute-force protection for authentication attempts is ENABLED by default.
+# Disable it explicitly when the server runs behind a reverse proxy that
+# already rate-limits authentication attempts.
 authentication:
   users:
     - username: "admin"
@@ -732,6 +752,11 @@ authentication:
     - username: "dev-user"
       password: "dev123"
       chassis: ["development-cluster"]
+  rate_limiting:
+    enabled: true
+    max_attempts: 10     # Failed attempts per window before blocking
+    window: 5m           # Counting window
+    block_duration: 15m  # How long a blocked address stays blocked
 
 # KubeVirt Configuration
 # ----------------------

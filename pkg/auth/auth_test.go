@@ -649,6 +649,175 @@ func TestNewEnhancedMiddleware(t *testing.T) {
 	if middleware.blockDuration != 15*time.Minute {
 		t.Errorf("Expected blockDuration 15m, got %v", middleware.blockDuration)
 	}
+
+	if middleware.rateLimitEnabled != true {
+		t.Error("Rate limiting should be enabled by default")
+	}
+}
+
+func TestNewEnhancedMiddleware_RateLimitingConfig(t *testing.T) {
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Users: []config.UserConfig{
+				{
+					Username: "testuser",
+					Password: config.PasswordConfig{Plain: "testpass"},
+					Chassis:  []string{"chassis1"},
+				},
+			},
+			RateLimiting: config.RateLimitingConfig{
+				Enabled:       &[]bool{true}[0],
+				MaxAttempts:   3,
+				Window:        2 * time.Minute,
+				BlockDuration: 30 * time.Second,
+			},
+		},
+	}
+
+	middleware := NewEnhancedMiddleware(cfg)
+
+	if !middleware.rateLimitEnabled {
+		t.Error("Rate limiting should be enabled when configured")
+	}
+	if middleware.maxAttempts != 3 {
+		t.Errorf("Expected maxAttempts 3, got %d", middleware.maxAttempts)
+	}
+	if middleware.rateLimitWindow != 2*time.Minute {
+		t.Errorf("Expected rateLimitWindow 2m, got %v", middleware.rateLimitWindow)
+	}
+	if middleware.blockDuration != 30*time.Second {
+		t.Errorf("Expected blockDuration 30s, got %v", middleware.blockDuration)
+	}
+
+	// Failed attempts must be tracked (and eventually block) when enabled
+	for i := 0; i < 3; i++ {
+		middleware.updateRateLimit("192.0.2.10", false)
+	}
+	if !middleware.isRateLimited("192.0.2.10", "test") {
+		t.Error("IP should be rate limited after max failed attempts")
+	}
+
+	// Explicitly disabled: the limiter never engages
+	disabled := NewEnhancedMiddleware(&config.Config{
+		Auth: config.AuthConfig{
+			RateLimiting: config.RateLimitingConfig{
+				Enabled: &[]bool{false}[0],
+			},
+		},
+	})
+	if disabled.rateLimitEnabled {
+		t.Error("Rate limiting should be disabled when explicitly disabled")
+	}
+}
+
+// TestEnhancedMiddleware_RateLimitingEnabledByDefault proves that when the
+// rate_limiting configuration section is absent, brute-force protection is
+// active: failed authentication attempts are answered with 401 until
+// max_attempts is reached, after which the client is blocked with 429.
+func TestEnhancedMiddleware_RateLimitingEnabledByDefault(t *testing.T) {
+	// No rate_limiting section in the configuration
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Users: []config.UserConfig{
+				{
+					Username: "testuser",
+					Password: config.PasswordConfig{Plain: "testpass"},
+					Chassis:  []string{"chassis1"},
+				},
+			},
+		},
+		Chassis: []config.ChassisConfig{
+			{
+				Name:      "chassis1",
+				Namespace: "default",
+			},
+		},
+	}
+
+	middleware := NewEnhancedMiddleware(cfg)
+
+	if !middleware.rateLimitEnabled {
+		t.Fatal("Rate limiting must default to on when the config section is absent")
+	}
+
+	handler := middleware.Authenticate(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	doFailedAuth := func() int {
+		req := httptest.NewRequest("GET", "/redfish/v1/Chassis/chassis1", nil)
+		req.Header.Set("Authorization", "Basic d3Jvbmc6d3Jvbmc=") // wrong:wrong
+		w := httptest.NewRecorder()
+		handler(w, req)
+		return w.Code
+	}
+
+	// Attempts up to max_attempts fail with 401
+	for i := 0; i < middleware.maxAttempts; i++ {
+		if code := doFailedAuth(); code != http.StatusUnauthorized {
+			t.Fatalf("Attempt %d: expected 401, got %d", i+1, code)
+		}
+	}
+
+	// Beyond max_attempts the client is blocked with 429
+	for i := 0; i < 5; i++ {
+		if code := doFailedAuth(); code != http.StatusTooManyRequests {
+			t.Fatalf("Blocked attempt %d: expected 429, got %d", i+1, code)
+		}
+	}
+}
+
+// TestEnhancedMiddleware_RateLimitingExplicitlyDisabled proves that an
+// explicit enabled: false keeps brute-force protection off: failed
+// authentication attempts are answered with 401, never 429, and no
+// rate-limit state is tracked.
+func TestEnhancedMiddleware_RateLimitingExplicitlyDisabled(t *testing.T) {
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Users: []config.UserConfig{
+				{
+					Username: "testuser",
+					Password: config.PasswordConfig{Plain: "testpass"},
+					Chassis:  []string{"chassis1"},
+				},
+			},
+			RateLimiting: config.RateLimitingConfig{
+				Enabled: &[]bool{false}[0],
+			},
+		},
+		Chassis: []config.ChassisConfig{
+			{
+				Name:      "chassis1",
+				Namespace: "default",
+			},
+		},
+	}
+
+	middleware := NewEnhancedMiddleware(cfg)
+
+	if middleware.rateLimitEnabled {
+		t.Fatal("Rate limiting must be off when explicitly disabled")
+	}
+
+	handler := middleware.Authenticate(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Far more failed attempts than max_attempts; all must stay 401, never 429
+	for i := 0; i < 50; i++ {
+		req := httptest.NewRequest("GET", "/redfish/v1/Chassis/chassis1", nil)
+		req.Header.Set("Authorization", "Basic d3Jvbmc6d3Jvbmc=") // wrong:wrong
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("Attempt %d: expected 401, got %d (rate limiting must not engage)", i+1, w.Code)
+		}
+	}
+
+	if len(middleware.rateLimits) != 0 {
+		t.Errorf("No rate-limit state should be tracked when disabled, got %d entries", len(middleware.rateLimits))
+	}
 }
 
 func TestEnhancedMiddleware_MaskPassword(t *testing.T) {
@@ -694,22 +863,35 @@ func TestEnhancedMiddleware_MaskPassword(t *testing.T) {
 func TestEnhancedMiddleware_GetClientIP(t *testing.T) {
 	middleware := NewEnhancedMiddleware(&config.Config{})
 
-	// Test with X-Forwarded-For header
+	// The last X-Forwarded-For entry is the one appended by the trusted
+	// reverse proxy in front of the server; earlier entries are
+	// client-controlled and must not be trusted.
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("X-Forwarded-For", "192.168.1.100, 10.0.0.1")
 
 	clientIP := middleware.getClientIP(req)
-	if clientIP != "192.168.1.100" {
-		t.Errorf("Expected '192.168.1.100', got '%s'", clientIP)
+	if clientIP != "10.0.0.1" {
+		t.Errorf("Expected '10.0.0.1' (last, proxy-appended entry), got '%s'", clientIP)
 	}
 
-	// Test with X-Real-IP header
+	// A single X-Forwarded-For entry is used as-is
 	req = httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set("X-Real-IP", "192.168.1.200")
+	req.Header.Set("X-Forwarded-For", "203.0.113.7")
 
 	clientIP = middleware.getClientIP(req)
-	if clientIP != "192.168.1.200" {
-		t.Errorf("Expected '192.168.1.200', got '%s'", clientIP)
+	if clientIP != "203.0.113.7" {
+		t.Errorf("Expected '203.0.113.7', got '%s'", clientIP)
+	}
+
+	// Client-supplied X-Real-IP / X-Client-IP headers are not trusted;
+	// the connection address is used instead
+	req = httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.200")
+	req.Header.Set("X-Client-IP", "192.168.1.201")
+
+	clientIP = middleware.getClientIP(req)
+	if clientIP != "192.0.2.1" { // httptest default RemoteAddr host
+		t.Errorf("Expected RemoteAddr host '192.0.2.1', got '%s'", clientIP)
 	}
 
 	// Test with RemoteAddr
@@ -1042,21 +1224,150 @@ func TestEnhancedMiddleware_SendForbiddenResponse(t *testing.T) {
 func TestEnhancedMiddleware_SendRateLimitResponse(t *testing.T) {
 	middleware := NewEnhancedMiddleware(&config.Config{})
 
-	// Create a test response writer
-	w := httptest.NewRecorder()
-
-	// Send rate limit response
-	middleware.sendRateLimitResponse(w, "Test rate limit message")
-
-	// Verify response
-	if w.Code != http.StatusTooManyRequests {
-		t.Errorf("Expected status code %d, got %d", http.StatusTooManyRequests, w.Code)
+	tests := []struct {
+		name     string
+		after    time.Duration
+		expected string
+	}{
+		{"whole seconds", 90 * time.Second, "90"},
+		{"rounds up sub-second remainder", 1500 * time.Millisecond, "2"},
+		{"minimum of one second", 0, "1"},
 	}
 
-	// Verify response body contains the message
-	body := w.Body.String()
-	if body == "" {
-		t.Error("Response body should not be empty")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+
+			middleware.sendRateLimitResponse(w, "Test rate limit message", tt.after)
+
+			if w.Code != http.StatusTooManyRequests {
+				t.Errorf("Expected status code %d, got %d", http.StatusTooManyRequests, w.Code)
+			}
+
+			if got := w.Header().Get("Retry-After"); got != tt.expected {
+				t.Errorf("Expected Retry-After %s, got %s", tt.expected, got)
+			}
+
+			if w.Body.Len() == 0 {
+				t.Error("Response body should not be empty")
+			}
+		})
+	}
+}
+
+// TestEnhancedMiddleware_RateLimitRetryAfterHeader verifies that the
+// Retry-After header of the 429 response reflects the configured block
+// duration instead of a hardcoded value.
+func TestEnhancedMiddleware_RateLimitRetryAfterHeader(t *testing.T) {
+	tests := []struct {
+		name     string
+		block    time.Duration
+		expected string
+	}{
+		{"short block", 30 * time.Second, "30"},
+		{"block longer than the old hardcoded value", 20 * time.Minute, "1200"},
+		{"sub-second block rounds up", 1500 * time.Millisecond, "2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Auth: config.AuthConfig{
+					Users: []config.UserConfig{
+						{
+							Username: "testuser",
+							Password: config.PasswordConfig{Plain: "testpass"},
+							Chassis:  []string{"chassis1"},
+						},
+					},
+					RateLimiting: config.RateLimitingConfig{
+						Enabled:       &[]bool{true}[0],
+						MaxAttempts:   2,
+						Window:        time.Minute,
+						BlockDuration: tt.block,
+					},
+				},
+				Chassis: []config.ChassisConfig{
+					{
+						Name:      "chassis1",
+						Namespace: "default",
+					},
+				},
+			}
+
+			middleware := NewEnhancedMiddleware(cfg)
+			handler := middleware.Authenticate(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+
+			doFailedAuth := func() *httptest.ResponseRecorder {
+				req := httptest.NewRequest("GET", "/redfish/v1/Chassis/chassis1", nil)
+				req.Header.Set("Authorization", "Basic d3Jvbmc6d3Jvbmc=") // wrong:wrong
+				w := httptest.NewRecorder()
+				handler(w, req)
+				return w
+			}
+
+			for i := 0; i < middleware.maxAttempts; i++ {
+				if w := doFailedAuth(); w.Code != http.StatusUnauthorized {
+					t.Fatalf("Attempt %d: expected 401, got %d", i+1, w.Code)
+				}
+			}
+
+			w := doFailedAuth()
+			if w.Code != http.StatusTooManyRequests {
+				t.Fatalf("Expected 429 after max attempts, got %d", w.Code)
+			}
+			if got := w.Header().Get("Retry-After"); got != tt.expected {
+				t.Errorf("Expected Retry-After %s, got %s", tt.expected, got)
+			}
+		})
+	}
+}
+
+// TestEnhancedMiddleware_ApplyRateLimitConfig verifies runtime updates of
+// the limiter settings, as used by the configuration reload path.
+func TestEnhancedMiddleware_ApplyRateLimitConfig(t *testing.T) {
+	middleware := NewEnhancedMiddleware(&config.Config{})
+
+	// Defaults are in effect
+	if !middleware.rateLimitEnabled || middleware.maxAttempts != 10 ||
+		middleware.rateLimitWindow != 5*time.Minute || middleware.blockDuration != 15*time.Minute {
+		t.Fatal("Expected default rate limiting settings")
+	}
+
+	// Applying new settings takes effect immediately
+	middleware.ApplyRateLimitConfig(config.RateLimitingConfig{
+		Enabled:       &[]bool{false}[0],
+		MaxAttempts:   3,
+		Window:        time.Minute,
+		BlockDuration: 30 * time.Second,
+	})
+
+	if middleware.rateLimitEnabled {
+		t.Error("Rate limiting should be disabled after applying enabled: false")
+	}
+	if middleware.maxAttempts != 3 {
+		t.Errorf("Expected maxAttempts 3, got %d", middleware.maxAttempts)
+	}
+	if middleware.rateLimitWindow != time.Minute {
+		t.Errorf("Expected rateLimitWindow 1m, got %v", middleware.rateLimitWindow)
+	}
+	if middleware.blockDuration != 30*time.Second {
+		t.Errorf("Expected blockDuration 30s, got %v", middleware.blockDuration)
+	}
+
+	// Zero values keep the current settings
+	middleware.ApplyRateLimitConfig(config.RateLimitingConfig{})
+	if middleware.rateLimitEnabled || middleware.maxAttempts != 3 ||
+		middleware.rateLimitWindow != time.Minute || middleware.blockDuration != 30*time.Second {
+		t.Error("Zero values must keep the current settings")
+	}
+
+	// Re-enabling works
+	middleware.ApplyRateLimitConfig(config.RateLimitingConfig{Enabled: &[]bool{true}[0]})
+	if !middleware.rateLimitEnabled {
+		t.Error("Rate limiting should be enabled after applying enabled: true")
 	}
 }
 
