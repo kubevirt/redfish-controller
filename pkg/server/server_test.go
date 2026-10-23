@@ -82,10 +82,8 @@ func TestNewServer(t *testing.T) {
 	assert.NotNil(t, server.enhancedAuthMiddleware)
 	assert.NotNil(t, server.taskManager)
 	assert.NotNil(t, server.jobScheduler)
-	assert.NotNil(t, server.memoryManager)
 	assert.NotNil(t, server.connectionManager)
 	assert.NotNil(t, server.memoryMonitor)
-	assert.NotNil(t, server.responseOptimizer)
 	assert.NotNil(t, server.circuitBreakerManager)
 	assert.NotNil(t, server.retryManager)
 	assert.NotNil(t, server.rateLimitManager)
@@ -295,8 +293,8 @@ func TestServerSendJSON(t *testing.T) {
 	assert.Equal(t, float64(200), response["code"])
 }
 
-// TestServerSendOptimizedJSON tests the sendOptimizedJSON method
-func TestServerSendOptimizedJSON(t *testing.T) {
+// TestServerEncodeJSONResponse tests the encodeJSONResponse method
+func TestServerEncodeJSONResponse(t *testing.T) {
 	server := testServer(t)
 
 	tests := []struct {
@@ -324,7 +322,7 @@ func TestServerSendOptimizedJSON(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 
-			server.sendOptimizedJSON(w, req, tt.testData)
+			server.encodeJSONResponse(w, tt.testData)
 
 			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -542,43 +540,6 @@ func TestServerSendConflictError(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&errorResponse)
 	assert.NoError(t, err)
 	assert.Contains(t, errorResponse.Error.Message, resource)
-}
-
-// TestServerSendJSONResponse tests the sendJSONResponse method
-func TestServerSendJSONResponse(t *testing.T) {
-	server := testServer(t)
-
-	tests := []struct {
-		name       string
-		statusCode int
-		data       interface{}
-	}{
-		{
-			name:       "success response",
-			statusCode: http.StatusOK,
-			data:       map[string]string{"status": "success"},
-		},
-		{
-			name:       "created response",
-			statusCode: http.StatusCreated,
-			data:       map[string]string{"id": "123"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-
-			server.sendJSONResponse(w, tt.statusCode, tt.data)
-
-			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
-			assert.Equal(t, tt.statusCode, w.Code)
-
-			var response map[string]interface{}
-			err := json.NewDecoder(w.Body).Decode(&response)
-			assert.NoError(t, err)
-		})
-	}
 }
 
 // TestServerGetAuthMiddleware tests the getAuthMiddleware method
@@ -873,38 +834,6 @@ func TestServerErrorHandling(t *testing.T) {
 	assert.NotEmpty(t, errorResponse.Error.Message)
 }
 
-// TestServerMemoryManagerIntegration tests integration with memory manager
-func TestServerMemoryManagerIntegration(t *testing.T) {
-	testConfig := &config.Config{
-		Server: config.ServerConfig{
-			Host: "localhost",
-			Port: 8080,
-		},
-	}
-
-	mockClient := &kubevirt.Client{}
-	server := NewServer(testConfig, mockClient)
-
-	// Test that memory manager is properly initialized
-	assert.NotNil(t, server.memoryManager)
-
-	// Test buffer allocation
-	buffer := server.memoryManager.GetBuffer()
-	assert.NotNil(t, buffer)
-	server.memoryManager.PutBuffer(buffer)
-
-	// Test encoder allocation
-	encoderBuffer := server.memoryManager.GetBuffer()
-	encoder := server.memoryManager.GetEncoder(encoderBuffer)
-	assert.NotNil(t, encoder)
-	server.memoryManager.PutEncoder(encoder)
-
-	// Test response allocation
-	response := server.memoryManager.GetResponse()
-	assert.NotNil(t, response)
-	server.memoryManager.PutResponse(response)
-}
-
 // TestServerStartTime tests that start time is properly initialized
 func TestServerStartTime(t *testing.T) {
 	testConfig := &config.Config{
@@ -1019,9 +948,6 @@ func testServerShutdown(t *testing.T, server *Server) {
 	case <-ctx.Done():
 		t.Log("Server shutdown timed out - forcing cleanup")
 		// Force cleanup by calling Stop() on all components directly
-		if server.memoryManager != nil {
-			server.memoryManager.Stop()
-		}
 		if server.connectionManager != nil {
 			server.connectionManager.Stop()
 		}
@@ -2008,11 +1934,9 @@ func TestHandleMetrics(t *testing.T) {
 		assert.Contains(t, response, "kubevirt_client")
 		assert.Contains(t, response, "task_manager")
 		assert.Contains(t, response, "job_scheduler")
-		assert.Contains(t, response, "memory_manager")
 		assert.Contains(t, response, "connection_manager")
 		assert.Contains(t, response, "memory_monitor")
 		assert.Contains(t, response, "memory_alerts")
-		assert.Contains(t, response, "response_optimizer")
 		assert.Contains(t, response, "circuit_breakers")
 		assert.Contains(t, response, "retry_mechanisms")
 		assert.Contains(t, response, "rate_limiters")
