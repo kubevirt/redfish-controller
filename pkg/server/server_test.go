@@ -85,15 +85,12 @@ func TestNewServer(t *testing.T) {
 	assert.NotNil(t, server.memoryManager)
 	assert.NotNil(t, server.connectionManager)
 	assert.NotNil(t, server.memoryMonitor)
-	assert.NotNil(t, server.advancedCache)
 	assert.NotNil(t, server.responseOptimizer)
-	assert.NotNil(t, server.responseCacheOptimizer)
 	assert.NotNil(t, server.circuitBreakerManager)
 	assert.NotNil(t, server.retryManager)
 	assert.NotNil(t, server.rateLimitManager)
 	assert.NotNil(t, server.healthChecker)
 	assert.NotNil(t, server.selfHealingManager)
-	assert.NotNil(t, server.responseCache)
 	assert.True(t, server.useEnhancedAuth)
 	assert.False(t, server.startTime.IsZero())
 }
@@ -1031,17 +1028,11 @@ func testServerShutdown(t *testing.T, server *Server) {
 		if server.memoryMonitor != nil {
 			server.memoryMonitor.Stop()
 		}
-		if server.advancedCache != nil {
-			server.advancedCache.Stop()
-		}
 		if server.healthChecker != nil {
 			server.healthChecker.Stop()
 		}
 		if server.selfHealingManager != nil {
 			server.selfHealingManager.Stop()
-		}
-		if server.responseCache != nil {
-			server.responseCache.Stop()
 		}
 		t.Log("Forced cleanup completed")
 	}
@@ -1933,16 +1924,13 @@ func TestHandleMetrics(t *testing.T) {
 		// Check that expected metrics sections exist
 		assert.Contains(t, response, "server")
 		assert.Contains(t, response, "kubevirt_client")
-		assert.Contains(t, response, "response_cache")
 		assert.Contains(t, response, "task_manager")
 		assert.Contains(t, response, "job_scheduler")
 		assert.Contains(t, response, "memory_manager")
 		assert.Contains(t, response, "connection_manager")
 		assert.Contains(t, response, "memory_monitor")
 		assert.Contains(t, response, "memory_alerts")
-		assert.Contains(t, response, "advanced_cache")
 		assert.Contains(t, response, "response_optimizer")
-		assert.Contains(t, response, "response_cache_optimizer")
 		assert.Contains(t, response, "circuit_breakers")
 		assert.Contains(t, response, "retry_mechanisms")
 		assert.Contains(t, response, "rate_limiters")

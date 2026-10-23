@@ -81,18 +81,15 @@ type Server struct {
 	memoryManager          *MemoryManager
 	connectionManager      *ConnectionManager
 	memoryMonitor          *MemoryMonitor
-	advancedCache          *AdvancedCache
 	responseOptimizer      *ResponseOptimizer
-	responseCacheOptimizer *ResponseCacheOptimizer
 	circuitBreakerManager  *CircuitBreakerManager
 	retryManager           *RetryManager
 	rateLimitManager       *RateLimitManager
 	healthChecker          *HealthChecker
 	selfHealingManager     *SelfHealingManager
 
-	startTime     time.Time    // Added for uptime calculation
-	responseCache *Cache       // Response cache for performance optimization
-	configMutex   sync.RWMutex // Protects config for hot-reload
+	startTime   time.Time    // Added for uptime calculation
+	configMutex sync.RWMutex // Protects config for hot-reload
 }
 
 // NewServer creates a new HTTP server instance.
@@ -113,9 +110,7 @@ func NewServer(config *config.Config, kubevirtClient *kubevirt.Client) *Server {
 	var memoryManager *MemoryManager
 	var connectionManager *ConnectionManager
 	var memoryMonitor *MemoryMonitor
-	var advancedCache *AdvancedCache
 	var responseOptimizer *ResponseOptimizer
-	var responseCacheOptimizer *ResponseCacheOptimizer
 	var circuitBreakerManager *CircuitBreakerManager
 	var retryManager *RetryManager
 	var rateLimitManager *RateLimitManager
@@ -139,14 +134,8 @@ func NewServer(config *config.Config, kubevirtClient *kubevirt.Client) *Server {
 		// Initialize memory monitor
 		memoryMonitor = NewMemoryMonitor()
 
-		// Initialize advanced cache
-		advancedCache = NewAdvancedCache()
-
 		// Initialize response optimizer
 		responseOptimizer = NewResponseOptimizer()
-
-		// Initialize response cache optimizer
-		responseCacheOptimizer = NewResponseCacheOptimizer()
 
 		// Initialize circuit breaker manager
 		circuitBreakerManager = NewCircuitBreakerManager()
@@ -166,12 +155,6 @@ func NewServer(config *config.Config, kubevirtClient *kubevirt.Client) *Server {
 		logger.Info("Test mode enabled - skipping background component initialization")
 	}
 
-	// Initialize response cache (skip in test mode)
-	var responseCache *Cache
-	if !config.Server.TestMode {
-		responseCache = NewCache(1000, 5*time.Minute) // 1000 entries, 5 minute default TTL
-	}
-
 	server := &Server{
 		config:                 config,
 		kubevirtClient:         kubevirtClient,
@@ -182,17 +165,14 @@ func NewServer(config *config.Config, kubevirtClient *kubevirt.Client) *Server {
 		memoryManager:          memoryManager,
 		connectionManager:      connectionManager,
 		memoryMonitor:          memoryMonitor,
-		advancedCache:          advancedCache,
 		responseOptimizer:      responseOptimizer,
-		responseCacheOptimizer: responseCacheOptimizer,
 		circuitBreakerManager:  circuitBreakerManager,
 		retryManager:           retryManager,
 		rateLimitManager:       rateLimitManager,
 		healthChecker:          healthChecker,
 		selfHealingManager:     selfHealingManager,
 
-		startTime:     time.Now(), // Initialize start time
-		responseCache: responseCache,
+		startTime: time.Now(), // Initialize start time
 	}
 
 	// Add default background jobs (skip in test mode)
@@ -272,21 +252,6 @@ func (s *Server) Shutdown() error {
 		// Stop the memory monitor
 		if s.memoryMonitor != nil {
 			s.memoryMonitor.Stop()
-		}
-
-		// Stop the response cache
-		if s.responseCache != nil {
-			s.responseCache.Stop()
-		}
-
-		// Stop the advanced cache
-		if s.advancedCache != nil {
-			s.advancedCache.Stop()
-		}
-
-		// Stop the response cache optimizer
-		if s.responseCacheOptimizer != nil {
-			s.responseCacheOptimizer.Stop()
 		}
 
 		// Stop the circuit breaker manager
@@ -381,16 +346,14 @@ func (s *Server) startWatchers() {
 func (s *Server) createMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Apply middleware chain: Logging -> Security -> Performance -> Compression -> Cache -> Authentication -> Handler
+	// Apply middleware chain: Logging -> Security -> Performance -> Compression -> Authentication -> Handler
 	// Service root endpoint
 	mux.Handle("/redfish/v1/",
 		LoggingMiddleware(
 			SecurityMiddleware(
 				PerformanceMiddleware(
 					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleServiceRoot),
-						),
+						s.getAuthMiddleware().Authenticate(s.handleServiceRoot),
 					),
 				),
 			),
@@ -403,9 +366,7 @@ func (s *Server) createMux() *http.ServeMux {
 			SecurityMiddleware(
 				PerformanceMiddleware(
 					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleChassisCollection),
-						),
+						s.getAuthMiddleware().Authenticate(s.handleChassisCollection),
 					),
 				),
 			),
@@ -418,9 +379,7 @@ func (s *Server) createMux() *http.ServeMux {
 			SecurityMiddleware(
 				PerformanceMiddleware(
 					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleChassis),
-						),
+						s.getAuthMiddleware().Authenticate(s.handleChassis),
 					),
 				),
 			),
@@ -433,9 +392,7 @@ func (s *Server) createMux() *http.ServeMux {
 			SecurityMiddleware(
 				PerformanceMiddleware(
 					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleSystemsCollection),
-						),
+						s.getAuthMiddleware().Authenticate(s.handleSystemsCollection),
 					),
 				),
 			),
@@ -448,9 +405,7 @@ func (s *Server) createMux() *http.ServeMux {
 			SecurityMiddleware(
 				PerformanceMiddleware(
 					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleSystem),
-						),
+						s.getAuthMiddleware().Authenticate(s.handleSystem),
 					),
 				),
 			),
@@ -463,16 +418,14 @@ func (s *Server) createMux() *http.ServeMux {
 			SecurityMiddleware(
 				PerformanceMiddleware(
 					CompressionMiddleware(
-						s.CacheMiddleware(
-							s.getAuthMiddleware().Authenticate(s.handleManager),
-						),
+						s.getAuthMiddleware().Authenticate(s.handleManager),
 					),
 				),
 			),
 		),
 	)
 
-	// Task endpoints (no caching for dynamic content)
+	// Task endpoints
 	mux.Handle("/redfish/v1/TaskService/Tasks/",
 		LoggingMiddleware(
 			SecurityMiddleware(
@@ -1148,11 +1101,6 @@ func (s *Server) handleInsertVirtualMedia(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusAccepted)
 	s.setCacheHeaders(w, "action")
 	s.encodeJSONResponse(w, redfishTask)
-
-	// Invalidate related cache entries after virtual media insertion
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s/VirtualMedia", systemName))
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s", systemName))
-	logger.Debug("Invalidated cache for system %s virtual media after insertion", systemName)
 }
 
 // handleEjectVirtualMedia handles POST requests to eject virtual media.
@@ -1205,11 +1153,6 @@ func (s *Server) handleEjectVirtualMedia(w http.ResponseWriter, r *http.Request,
 			},
 		},
 	})
-
-	// Invalidate related cache entries after virtual media ejection
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s/VirtualMedia", systemName))
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s", systemName))
-	logger.Debug("Invalidated cache for system %s virtual media after ejection", systemName)
 }
 
 // handleBootUpdate handles PATCH requests to update boot configuration.
@@ -1407,11 +1350,6 @@ func (s *Server) handleBootUpdate(w http.ResponseWriter, r *http.Request, system
 	s.setCacheHeaders(w, "resource")
 	w.WriteHeader(http.StatusOK)
 	s.encodeJSONResponse(w, system)
-
-	// Invalidate related cache entries
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s", systemName))
-	s.responseCache.Invalidate("Systems") // Invalidate systems collection
-	logger.Debug("Invalidated cache for system %s after boot update", systemName)
 }
 
 // handleManager handles individual manager endpoints.
@@ -1655,10 +1593,7 @@ func (s *Server) handlePowerAction(w http.ResponseWriter, r *http.Request, syste
 		},
 	})
 
-	// Invalidate related cache entries after power state change
-	s.responseCache.Invalidate(fmt.Sprintf("Systems/%s", responseSystemID))
-	s.responseCache.Invalidate("Systems") // Invalidate systems collection
-	logger.Debug("Invalidated cache for system %s after power action %s", systemName, resetRequest.ResetType)
+	logger.Debug("Power action %s executed for system %s", resetRequest.ResetType, systemName)
 }
 
 // handleMetrics handles the performance metrics endpoint
@@ -1676,9 +1611,6 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Get performance metrics from KubeVirt client
 	metrics := s.kubevirtClient.GetPerformanceMetrics()
 
-	// Get cache statistics
-	cacheStats := s.responseCache.GetStats()
-
 	// Get task manager statistics
 	taskManagerStats := s.taskManager.GetStats()
 
@@ -1695,14 +1627,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	memoryMonitorStats := s.memoryMonitor.GetStats()
 	memoryAlerts := s.memoryMonitor.GetAlerts()
 
-	// Get advanced cache statistics
-	advancedCacheStats := s.advancedCache.GetStats()
-
 	// Get response optimizer statistics
 	responseOptimizerStats := s.responseOptimizer.GetStats()
-
-	// Get response cache optimizer statistics
-	responseCacheOptimizerStats := s.responseCacheOptimizer.GetStats()
 
 	// Get circuit breaker statistics
 	circuitBreakerStats := s.circuitBreakerManager.GetStats()
@@ -1721,21 +1647,18 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"server": map[string]interface{}{
 			"uptime": time.Since(s.startTime).String(),
 		},
-		"kubevirt_client":          metrics,
-		"response_cache":           cacheStats,
-		"task_manager":             taskManagerStats,
-		"job_scheduler":            schedulerStats,
-		"memory_manager":           memoryStats,
-		"connection_manager":       connectionStats,
-		"memory_monitor":           memoryMonitorStats,
-		"memory_alerts":            memoryAlerts,
-		"advanced_cache":           advancedCacheStats,
-		"response_optimizer":       responseOptimizerStats,
-		"response_cache_optimizer": responseCacheOptimizerStats,
-		"circuit_breakers":         circuitBreakerStats,
-		"retry_mechanisms":         retryStats,
-		"rate_limiters":            rateLimitStats,
-		"health_checker":           healthStats,
+		"kubevirt_client":    metrics,
+		"task_manager":       taskManagerStats,
+		"job_scheduler":      schedulerStats,
+		"memory_manager":     memoryStats,
+		"connection_manager": connectionStats,
+		"memory_monitor":     memoryMonitorStats,
+		"memory_alerts":      memoryAlerts,
+		"response_optimizer": responseOptimizerStats,
+		"circuit_breakers":   circuitBreakerStats,
+		"retry_mechanisms":   retryStats,
+		"rate_limiters":      rateLimitStats,
+		"health_checker":     healthStats,
 	}
 
 	// Return metrics with no-cache headers
