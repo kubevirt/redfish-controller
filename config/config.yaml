@@ -6,6 +6,7 @@ kubevirt:
 server:
   host: "0.0.0.0"                                   # Host for the Redfish server (0.0.0.0 is default (typically unchanged unless testing)
   port: 8443                                        # Port for the Redfish server (8443 is default (typically unchanged unless testing)
+  workers: 8                                        # Background task pool size for virtual media and other async tasks (8 is default)
   tls:
     enabled: false                                  # Disabled for development/testing (not required with OpenShift because of default route TLS)
     cert_file: "/etc/kubevirt-redfish/tls/tls.crt"  # Path to the certificate file (not required with OpenShift, but may be leveraged for other platforms)

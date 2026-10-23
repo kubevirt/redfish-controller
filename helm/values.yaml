@@ -204,6 +204,12 @@ server:
   # Server port
   port: 8443
   
+  # Background task pool size (virtual media insert/eject and other async
+  # Redfish tasks). Each job is a short burst of Kubernetes API calls, so this
+  # bounds how many inserts start at once, not how many ISOs copy at once.
+  # Read at startup only; changing it needs a restart.
+  workers: 8
+
   # System ID convention for Redfish compliance
   # Options: "legacy" (vm-name only) or "enhanced" (namespace.vm-name)
   # Default: "legacy" for backward compatibility with existing Metal3/Ironic deployments
