@@ -102,6 +102,93 @@ kubevirt:
 	if config.KubeVirt.Timeout != 30 {
 		t.Errorf("Expected timeout 30, got %d", config.KubeVirt.Timeout)
 	}
+	// Unless configured, the rate limits are client-go's own defaults.
+	if config.KubeVirt.QPS != 5 {
+		t.Errorf("Expected default qps 5 (client-go default), got %v", config.KubeVirt.QPS)
+	}
+	if config.KubeVirt.Burst != 10 {
+		t.Errorf("Expected default burst 10 (client-go default), got %d", config.KubeVirt.Burst)
+	}
+}
+
+// minimalConfig is the smallest config that passes validation, with the
+// kubevirt section supplied by the caller.
+func minimalConfig(kubevirtSection string) string {
+	return `
+server:
+  host: "127.0.0.1"
+  port: 8443
+  tls:
+    enabled: false
+
+chassis:
+  - name: "test-cluster"
+    namespace: "test-namespace"
+    service_account: "test-sa"
+
+authentication:
+  users:
+    - username: "testuser"
+      password: "testpass"
+      chassis: ["test-cluster"]
+
+kubevirt:
+  api_version: "v1"
+  timeout: 30
+` + kubevirtSection
+}
+
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	return configPath
+}
+
+func TestKubeClientRateLimits(t *testing.T) {
+	t.Run("from config file", func(t *testing.T) {
+		config, err := LoadConfig(writeConfig(t, minimalConfig("  qps: 250\n  burst: 500\n")))
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+		qps, burst := config.GetKubeClientRateLimits()
+		if qps != 250 || burst != 500 {
+			t.Errorf("Expected qps=250 burst=500, got qps=%v burst=%d", qps, burst)
+		}
+	})
+
+	t.Run("from environment", func(t *testing.T) {
+		t.Setenv("KUBEVIRT_REDFISH_KUBEVIRT_QPS", "300")
+		t.Setenv("KUBEVIRT_REDFISH_KUBEVIRT_BURST", "600")
+		config, err := LoadConfig(writeConfig(t, minimalConfig("")))
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+		qps, burst := config.GetKubeClientRateLimits()
+		if qps != 300 || burst != 600 {
+			t.Errorf("Expected qps=300 burst=600 from env, got qps=%v burst=%d", qps, burst)
+		}
+	})
+
+	t.Run("rejects negative values", func(t *testing.T) {
+		for _, section := range []string{"  qps: -1\n", "  burst: -1\n"} {
+			if _, err := LoadConfig(writeConfig(t, minimalConfig(section))); err == nil {
+				t.Errorf("Expected validation error for %q, got nil", section)
+			}
+		}
+	})
+
+	t.Run("zero means default", func(t *testing.T) {
+		config, err := LoadConfig(writeConfig(t, minimalConfig("  qps: 0\n  burst: 0\n")))
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+		if qps, burst := config.GetKubeClientRateLimits(); qps != DefaultKubeClientQPS || burst != DefaultKubeClientBurst {
+			t.Errorf("Expected defaults for zero values, got qps=%v burst=%d", qps, burst)
+		}
+	})
 }
 
 func TestLoadConfigWithDefaults(t *testing.T) {
