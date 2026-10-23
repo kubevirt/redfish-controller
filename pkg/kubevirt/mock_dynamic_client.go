@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -333,7 +334,7 @@ func (r *mockNamespaceableResource) DeleteCollection(ctx context.Context, option
 func (r *mockNamespaceableResource) Get(ctx context.Context, name string, options metav1.GetOptions, subresources ...string) (*unstructured.Unstructured, error) {
 	obj, found := r.client.getResource(r.gvr, r.namespace, name)
 	if !found {
-		return nil, fmt.Errorf("%s \"%s\" not found", r.gvr.Resource, name)
+		return nil, apierrors.NewNotFound(r.gvr.GroupResource(), name)
 	}
 	return deepCopyUnstructured(obj)
 }
@@ -369,7 +370,7 @@ func (r *mockNamespaceableResource) Watch(ctx context.Context, opts metav1.ListO
 func (r *mockNamespaceableResource) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, options metav1.PatchOptions, subresources ...string) (*unstructured.Unstructured, error) {
 	obj, found := r.client.getResource(r.gvr, r.namespace, name)
 	if !found {
-		return nil, fmt.Errorf("%s \"%s\" not found", r.gvr.Resource, name)
+		return nil, apierrors.NewNotFound(r.gvr.GroupResource(), name)
 	}
 
 	// Make a copy to modify
