@@ -1263,7 +1263,7 @@ func TestHandleManager(t *testing.T) {
 
 	// Test 1: Valid GET request to manager
 	t.Run("Valid GET request", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/redfish/v1/Managers/manager1", nil)
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers/chassis1", nil)
 		req.Header.Set("Authorization", "Basic dGVzdHVzZXI6dGVzdHBhc3M=") // testuser:testpass
 
 		// Set up authentication context manually for testing
@@ -1293,7 +1293,7 @@ func TestHandleManager(t *testing.T) {
 		var response map[string]interface{}
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		assert.NoError(t, err)
-		assert.Equal(t, "manager1", response["Id"])
+		assert.Equal(t, "chassis1", response["Id"])
 		assert.Equal(t, "KubeVirt Manager", response["Name"])
 		assert.Equal(t, "#Manager.v1_0_0.Manager", response["@odata.type"])
 		assert.Equal(t, "Service", response["ManagerType"])
@@ -1301,6 +1301,42 @@ func TestHandleManager(t *testing.T) {
 		assert.Equal(t, "OK", response["Status"].(map[string]interface{})["Health"])
 		// ManagerForSystems should be empty due to nil KubeVirt client
 		assert.Empty(t, response["Links"].(map[string]interface{})["ManagerForSystems"])
+	})
+
+	// Test 1b: Manager ID that does not map to a configured chassis
+	t.Run("Unknown manager ID", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers/manager1", nil)
+
+		user := &auth.User{
+			Username: "testuser",
+			Chassis:  []string{"chassis1"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManager(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	// Test 1c: Manager for a chassis the user has no access to
+	t.Run("Foreign chassis manager", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers/chassis1", nil)
+
+		user := &auth.User{
+			Username: "noaccess",
+			Chassis:  []string{"other-chassis"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManager(w, req)
+
+		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 
 	// Test 2: Invalid path (too short)
@@ -1339,7 +1375,7 @@ func TestHandleManager(t *testing.T) {
 
 	// Test 4: Invalid HTTP method
 	t.Run("Invalid HTTP method", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/redfish/v1/Managers/manager1", nil)
+		req := httptest.NewRequest("POST", "/redfish/v1/Managers/chassis1", nil)
 		w := httptest.NewRecorder()
 
 		server.handleManager(w, req)
@@ -1435,6 +1471,254 @@ func TestServerUpdateConfigRateLimiting(t *testing.T) {
 	if got := w.Header().Get("Retry-After"); got != "30" {
 		t.Errorf("Expected Retry-After 30 after reload, got %s", got)
 	}
+}
+
+// TestHandleManager_SystemIDConvention verifies that the ManagerForSystems
+// links follow the configured system_id_convention.
+func TestHandleManager_SystemIDConvention(t *testing.T) {
+	tests := []struct {
+		name           string
+		convention     string
+		expectedLinkID string
+	}{
+		{
+			name:           "enhanced convention uses namespace-qualified IDs",
+			convention:     "enhanced",
+			expectedLinkID: "/redfish/v1/Systems/ns-a.test-vm",
+		},
+		{
+			name:           "legacy convention uses bare VM names",
+			convention:     "legacy",
+			expectedLinkID: "/redfish/v1/Systems/test-vm",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDynamic := kubevirt.NewMockDynamicClient()
+			fakeK8s := fake.NewSimpleClientset()
+			client := kubevirt.NewClientWithClients(fakeK8s, mockDynamic, 30*time.Second, nil)
+
+			vm := &kubevirtv1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vm",
+					Namespace: "ns-a",
+					Labels:    map[string]string{"redfish-enabled": "true"},
+				},
+				Spec: kubevirtv1.VirtualMachineSpec{},
+			}
+			if err := mockDynamic.AddVM(vm); err != nil {
+				t.Fatalf("Failed to add VM: %v", err)
+			}
+
+			cfg := &config.Config{
+				Server: config.ServerConfig{
+					Host:     "localhost",
+					Port:     8080,
+					TestMode: true,
+				},
+				SystemIDConvention: tt.convention,
+				Auth: config.AuthConfig{
+					Users: []config.UserConfig{
+						{Username: "user1", Password: "pass1", Chassis: []string{"chassis-a"}},
+					},
+				},
+				Chassis: []config.ChassisConfig{
+					{
+						Name:      "chassis-a",
+						Namespace: "ns-a",
+						VMSelector: &kubevirt.VMSelectorConfig{
+							Labels: map[string]string{"redfish-enabled": "true"},
+						},
+					},
+				},
+			}
+			server := NewServer(cfg, client)
+
+			req := httptest.NewRequest("GET", "/redfish/v1/Managers/chassis-a", nil)
+			user := &auth.User{Username: "user1", Chassis: []string{"chassis-a"}}
+			authCtx := &auth.AuthContext{User: user, Chassis: ""}
+			ctx := logger.WithAuth(req.Context(), authCtx)
+			req = req.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			server.handleManager(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+
+			var response map[string]interface{}
+			err := json.Unmarshal(w.Body.Bytes(), &response)
+			assert.NoError(t, err)
+
+			links := response["Links"].(map[string]interface{})["ManagerForSystems"].([]interface{})
+			assert.Len(t, links, 1)
+			assert.Equal(t, tt.expectedLinkID, links[0].(map[string]interface{})["@odata.id"])
+		})
+	}
+}
+
+// TestHandleManager_ManagerForSystemsPerChassis is a regression test: a
+// manager represents a single chassis, so ManagerForSystems must list only
+// that chassis' systems even when the user can access several chassis.
+func TestHandleManager_ManagerForSystemsPerChassis(t *testing.T) {
+	mockDynamic := kubevirt.NewMockDynamicClient()
+	fakeK8s := fake.NewSimpleClientset()
+	client := kubevirt.NewClientWithClients(fakeK8s, mockDynamic, 30*time.Second, nil)
+
+	vmA := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vm-a",
+			Namespace: "ns-a",
+			Labels:    map[string]string{"redfish-enabled": "true"},
+		},
+		Spec: kubevirtv1.VirtualMachineSpec{},
+	}
+	vmB := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vm-b",
+			Namespace: "ns-b",
+			Labels:    map[string]string{"redfish-enabled": "true"},
+		},
+		Spec: kubevirtv1.VirtualMachineSpec{},
+	}
+	for _, vm := range []*kubevirtv1.VirtualMachine{vmA, vmB} {
+		if err := mockDynamic.AddVM(vm); err != nil {
+			t.Fatalf("Failed to add VM: %v", err)
+		}
+	}
+
+	cfg := &config.Config{
+		Server:             config.ServerConfig{Host: "localhost", Port: 8080, TestMode: true},
+		SystemIDConvention: "enhanced",
+		Auth: config.AuthConfig{
+			Users: []config.UserConfig{
+				{Username: "dual", Password: "pass", Chassis: []string{"chassis-a", "chassis-b"}},
+			},
+		},
+		Chassis: []config.ChassisConfig{
+			{
+				Name:      "chassis-a",
+				Namespace: "ns-a",
+				VMSelector: &kubevirt.VMSelectorConfig{
+					Labels: map[string]string{"redfish-enabled": "true"},
+				},
+			},
+			{
+				Name:      "chassis-b",
+				Namespace: "ns-b",
+				VMSelector: &kubevirt.VMSelectorConfig{
+					Labels: map[string]string{"redfish-enabled": "true"},
+				},
+			},
+		},
+	}
+	server := NewServer(cfg, client)
+
+	tests := []struct {
+		manager  string
+		expected []string
+	}{
+		{"chassis-a", []string{"/redfish/v1/Systems/ns-a.vm-a"}},
+		{"chassis-b", []string{"/redfish/v1/Systems/ns-b.vm-b"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.manager, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/redfish/v1/Managers/"+tt.manager, nil)
+			user := &auth.User{Username: "dual", Chassis: []string{"chassis-a", "chassis-b"}}
+			authCtx := &auth.AuthContext{User: user, Chassis: ""}
+			ctx := logger.WithAuth(req.Context(), authCtx)
+			req = req.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			server.handleManager(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+
+			var response map[string]interface{}
+			err := json.Unmarshal(w.Body.Bytes(), &response)
+			assert.NoError(t, err)
+
+			links := response["Links"].(map[string]interface{})["ManagerForSystems"].([]interface{})
+			ids := make([]string, 0, len(links))
+			for _, l := range links {
+				ids = append(ids, l.(map[string]interface{})["@odata.id"].(string))
+			}
+			assert.ElementsMatch(t, tt.expected, ids)
+		})
+	}
+}
+
+// TestHandleManagerCollection tests the handleManagerCollection HTTP handler
+func TestHandleManagerCollection(t *testing.T) {
+	server := testServer(t)
+
+	// Test 1: Valid GET request, user has access to chassis1
+	t.Run("Valid GET request", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers", nil)
+
+		user := &auth.User{
+			Username: "testuser",
+			Chassis:  []string{"chassis1"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManagerCollection(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var response redfish.ManagerCollection
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		assert.NoError(t, err)
+		assert.Equal(t, "Manager Collection", response.Name)
+		assert.Equal(t, 1, response.MembersCount)
+		assert.Len(t, response.Members, 1)
+		assert.Equal(t, "/redfish/v1/Managers/chassis1", response.Members[0].OdataID)
+	})
+
+	// Test 2: Unconfigured chassis in the user's ACL is not listed
+	t.Run("Skips unconfigured chassis", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/redfish/v1/Managers", nil)
+
+		user := &auth.User{
+			Username: "noaccess",
+			Chassis:  []string{"gone-chassis", "chassis1"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManagerCollection(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var response redfish.ManagerCollection
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, response.MembersCount)
+		assert.Equal(t, "/redfish/v1/Managers/chassis1", response.Members[0].OdataID)
+	})
+
+	// Test 3: Invalid HTTP method
+	t.Run("Invalid HTTP method", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/redfish/v1/Managers", nil)
+
+		user := &auth.User{
+			Username: "testuser",
+			Chassis:  []string{"chassis1"},
+		}
+		authCtx := &auth.AuthContext{User: user, Chassis: ""}
+		ctx := logger.WithAuth(req.Context(), authCtx)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		server.handleManagerCollection(w, req)
+
+		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+	})
 }
 
 // TestHandleTask tests the handleTask HTTP handler

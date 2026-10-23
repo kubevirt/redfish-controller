@@ -369,7 +369,14 @@ func (s *Server) createMux() *http.ServeMux {
 		),
 	)
 
-	// Managers endpoint
+	// Managers collection endpoint
+	mux.Handle("/redfish/v1/Managers",
+		LoggingMiddleware(
+			s.getAuthMiddleware().Authenticate(s.handleManagerCollection),
+		),
+	)
+
+	// Individual managers endpoint
 	mux.Handle("/redfish/v1/Managers/",
 		LoggingMiddleware(
 			s.getAuthMiddleware().Authenticate(s.handleManager),
@@ -1291,6 +1298,47 @@ func (s *Server) handleBootUpdate(w http.ResponseWriter, r *http.Request, system
 	s.encodeJSONResponse(w, system)
 }
 
+// handleManagerCollection handles the managers collection endpoint.
+// It returns links to the managers (one per chassis) the user can access.
+//
+// Parameters:
+// - w: HTTP response writer
+// - r: HTTP request
+func (s *Server) handleManagerCollection(w http.ResponseWriter, r *http.Request) {
+	// Validate HTTP method
+	if !s.validateMethod(w, r, []string{"GET"}) {
+		return
+	}
+
+	user := auth.GetUser(r)
+	cfg := s.currentConfig()
+
+	// Build the member links from the user's accessible chassis, skipping
+	// chassis that are no longer configured so no link dangles
+	var members []redfish.Link
+	for _, chassisName := range user.Chassis {
+		if _, err := cfg.GetChassisByName(chassisName); err != nil {
+			continue
+		}
+		members = append(members, redfish.Link{
+			OdataID: fmt.Sprintf("/redfish/v1/Managers/%s", chassisName),
+		})
+	}
+
+	collection := redfish.ManagerCollection{
+		OdataContext: "/redfish/v1/$metadata#ManagerCollection.ManagerCollection",
+		OdataID:      "/redfish/v1/Managers",
+		OdataType:    "#ManagerCollection.ManagerCollection",
+		Name:         "Manager Collection",
+		Members:      members,
+		MembersCount: len(members),
+	}
+
+	// Set appropriate cache headers for collections
+	s.setCacheHeaders(w, "collection")
+	s.encodeJSONResponse(w, collection)
+}
+
 // handleManager handles individual manager endpoints.
 // It returns details of a specific manager that manages the systems.
 //
@@ -1316,29 +1364,35 @@ func (s *Server) handleManager(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user and their accessible systems
-	user := auth.GetUser(r)
 	cfg := s.currentConfig()
+
+	// A manager maps to a configured chassis; unknown manager IDs do not exist
+	chassisCfg, err := cfg.GetChassisByName(managerID)
+	if err != nil {
+		s.sendNotFound(w, "Manager not found")
+		return
+	}
+
+	// Check if the user has access to the chassis this manager manages
+	if !auth.HasChassisAccess(r, managerID) {
+		s.sendForbidden(w, "Access denied to chassis")
+		return
+	}
+
+	// The manager represents exactly this chassis, so ManagerForSystems
+	// lists only its systems, even when the user can access other chassis
+	vms, err := s.kubevirtClient.ListVMsWithSelector(chassisCfg.Namespace, chassisCfg.VMSelector)
+	if err != nil {
+		logger.Error("Failed to list VMs for chassis %s: %v", managerID, err)
+		vms = []string{}
+	}
+
 	var managerForSystems []map[string]string
-
-	// Build dynamic ManagerForSystems links based on user's accessible chassis
-	for _, chassisName := range user.Chassis {
-		chassisCfg, err := cfg.GetChassisByName(chassisName)
-		if err != nil {
-			continue
-		}
-
-		vms, err := s.kubevirtClient.ListVMsWithSelector(chassisCfg.Namespace, chassisCfg.VMSelector)
-		if err != nil {
-			logger.Error("Failed to list VMs for chassis %s: %v", chassisName, err)
-			continue
-		}
-
-		for _, vmName := range vms {
-			managerForSystems = append(managerForSystems, map[string]string{
-				"@odata.id": fmt.Sprintf("/redfish/v1/Systems/%s", vmName),
-			})
-		}
+	for _, vmName := range vms {
+		systemID := config.GenerateSystemID(cfg.SystemIDConvention, chassisCfg.Namespace, vmName)
+		managerForSystems = append(managerForSystems, map[string]string{
+			"@odata.id": fmt.Sprintf("/redfish/v1/Systems/%s", systemID),
+		})
 	}
 
 	// Return a basic manager resource
