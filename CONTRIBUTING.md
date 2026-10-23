@@ -83,7 +83,7 @@ kubevirt-redfish/
 │   ├── logger/            # Logging
 │   ├── redfish/           # Redfish types
 │   └── server/            # HTTP server
-├── scripts/               # Utility scripts
+├── hack/                  # CI and development helper scripts
 └── Makefile               # Build and development tasks
 ```
 
@@ -351,7 +351,7 @@ kubectl cluster-info
 kubectl get pods -n kubevirt
 
 # Check test configuration
-./scripts/test-integration.sh --help
+./hack/test-integration.sh --help
 ```
 
 ### Getting Help

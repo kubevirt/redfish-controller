@@ -1,6 +1,6 @@
-# Scripts Directory
+# Hack Directory
 
-This directory contains utility scripts for building, testing, and deploying the kubevirt-redfish project.
+This directory contains helper scripts for building, testing, and releasing the kubevirt-redfish project.
 
 ## Available Scripts
 
@@ -10,12 +10,12 @@ Builds and pushes a container image to a registry using Buildah.
 
 **Usage:**
 ```bash
-./scripts/build-and-push-container.sh <tag>
+./hack/build-and-push-container.sh <tag>
 ```
 
 **Example:**
 ```bash
-./scripts/build-and-push-container.sh v0.2.0
+./hack/build-and-push-container.sh v0.2.0
 ```
 
 **Environment Variables:**
@@ -31,12 +31,12 @@ Tags an existing image with the 'latest' tag.
 
 **Usage:**
 ```bash
-./scripts/tag-latest.sh <commit-sha>
+./hack/tag-latest.sh <commit-sha>
 ```
 
 **Example:**
 ```bash
-./scripts/tag-latest.sh 85b872ea
+./hack/tag-latest.sh 85b872ea
 ```
 
 **Environment Variables:**
@@ -52,7 +52,7 @@ Runs integration tests against a real Kubernetes cluster.
 
 **Usage:**
 ```bash
-./scripts/test-integration.sh
+./hack/test-integration.sh
 ```
 
 **Environment Variables:**
@@ -76,7 +76,7 @@ make test-integration
 
 ## Using with CI/CD
 
-The build and tag scripts are designed to work with CI/CD systems like GitHub Actions or GitLab CI. They use environment variables for configuration, making them portable across different environments.
+The build and tag scripts are designed to work with CI/CD systems like GitHub Actions or GitLab CI. They use environment variables for configuration, which keeps the Makefile and CI workflows thin and reusable.
 
 ## Customization
 
@@ -87,5 +87,5 @@ All scripts use environment variables for configuration, making them easy to cus
 export REGISTRY="docker.io"
 export NAMESPACE="myorg"
 export IMAGE_NAME="my-kubevirt-redfish"
-./scripts/build-and-push-container.sh v1.0.0
+./hack/build-and-push-container.sh v1.0.0
 ``` 
