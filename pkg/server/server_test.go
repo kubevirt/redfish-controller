@@ -336,47 +336,78 @@ func TestServerEncodeJSONResponse(t *testing.T) {
 }
 
 // TestServerSetCacheHeaders tests the setCacheHeaders method
-func TestServerSetCacheHeaders(t *testing.T) {
+// TestServerSetNoCacheHeaders verifies that responses carrying user-specific
+// (chassis-filtered) data are marked as not cacheable, so no shared cache may
+// store and serve them to a different user.
+func TestServerSetNoCacheHeaders(t *testing.T) {
 	server := testServer(t)
 
-	tests := []struct {
-		name         string
-		resourceType string
-		expected     string
-	}{
-		{
-			name:         "collection",
-			resourceType: "collection",
-			expected:     "public, max-age=30",
+	w := httptest.NewRecorder()
+	server.setNoCacheHeaders(w)
+
+	assert.Equal(t, "no-cache, no-store, must-revalidate", w.Header().Get("Cache-Control"))
+}
+
+// TestServerCollectionsNotCacheable is a regression test: collection and
+// resource responses are filtered per user and must not advertise caching.
+func TestServerCollectionsNotCacheable(t *testing.T) {
+	mockDynamic := kubevirt.NewMockDynamicClient()
+	fakeK8s := fake.NewSimpleClientset()
+	client := kubevirt.NewClientWithClients(fakeK8s, mockDynamic, 30*time.Second, nil)
+
+	cfg := &config.Config{
+		Server:             config.ServerConfig{Host: "localhost", Port: 8080, TestMode: true},
+		SystemIDConvention: "enhanced",
+		Auth: config.AuthConfig{
+			Users: []config.UserConfig{
+				{Username: "user", Password: "pass", Chassis: []string{"chassis-a"}},
+			},
 		},
-		{
-			name:         "resource",
-			resourceType: "resource",
-			expected:     "public, max-age=300, must-revalidate",
-		},
-		{
-			name:         "task",
-			resourceType: "task",
-			expected:     "no-cache, no-store, must-revalidate",
-		},
-		{
-			name:         "action",
-			resourceType: "action",
-			expected:     "no-cache, no-store, must-revalidate",
-		},
-		{
-			name:         "default",
-			resourceType: "unknown",
-			expected:     "public, max-age=60, must-revalidate",
+		Chassis: []config.ChassisConfig{
+			{
+				Name:      "chassis-a",
+				Namespace: "ns-a",
+				VMSelector: &kubevirt.VMSelectorConfig{
+					Labels: map[string]string{"redfish-enabled": "true"},
+				},
+			},
 		},
 	}
+	server := NewServer(cfg, client)
 
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"Chassis collection", "/redfish/v1/Chassis"},
+		{"Chassis resource", "/redfish/v1/Chassis/chassis-a"},
+		{"Managers collection", "/redfish/v1/Managers"},
+		{"Manager resource", "/redfish/v1/Managers/chassis-a"},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			server.setCacheHeaders(w, tt.resourceType)
+			req := httptest.NewRequest("GET", tt.path, nil)
+			user := &auth.User{Username: "user", Chassis: []string{"chassis-a"}}
+			authCtx := &auth.AuthContext{User: user, Chassis: ""}
+			ctx := logger.WithAuth(req.Context(), authCtx)
+			req = req.WithContext(ctx)
 
-			assert.Equal(t, tt.expected, w.Header().Get("Cache-Control"))
+			w := httptest.NewRecorder()
+
+			switch tt.name {
+			case "Chassis collection":
+				server.handleChassisCollection(w, req)
+			case "Chassis resource":
+				server.handleChassis(w, req)
+			case "Managers collection":
+				server.handleManagerCollection(w, req)
+			case "Manager resource":
+				server.handleManager(w, req)
+			}
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, "no-cache, no-store, must-revalidate", w.Header().Get("Cache-Control"))
+			assert.NotContains(t, w.Header().Get("Cache-Control"), "public")
 		})
 	}
 }

@@ -499,7 +499,7 @@ func (s *Server) handleChassisCollection(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Set appropriate cache headers for collections
-	s.setCacheHeaders(w, "collection")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, collection)
 }
 
@@ -586,7 +586,7 @@ func (s *Server) handleChassis(w http.ResponseWriter, r *http.Request) {
 	// Return the resource with proper Redfish headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", chassis.OdataEtag)
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, chassis)
 }
 
@@ -641,7 +641,7 @@ func (s *Server) handleSystemsCollection(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Set appropriate cache headers for collections
-	s.setCacheHeaders(w, "collection")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, collection)
 }
 
@@ -789,7 +789,7 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	// Return the resource with proper Redfish headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", system.OdataEtag)
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, system)
 }
 
@@ -906,7 +906,7 @@ func (s *Server) handleVirtualMediaCollection(w http.ResponseWriter, r *http.Req
 	}
 
 	// Set appropriate cache headers for collections
-	s.setCacheHeaders(w, "collection")
+	s.setNoCacheHeaders(w)
 	s.sendJSON(w, collection)
 }
 
@@ -964,7 +964,7 @@ func (s *Server) handleGetVirtualMedia(w http.ResponseWriter, r *http.Request, s
 	// Return the resource with proper Redfish headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", virtualMedia.OdataEtag)
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, virtualMedia)
 }
 
@@ -1045,7 +1045,7 @@ func (s *Server) handleInsertVirtualMedia(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	s.setCacheHeaders(w, "action")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, redfishTask)
 }
 
@@ -1082,7 +1082,7 @@ func (s *Server) handleEjectVirtualMedia(w http.ResponseWriter, r *http.Request,
 	// Return success response with proper Redfish format
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	s.setCacheHeaders(w, "action")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, map[string]interface{}{
 		"@odata.context": "/redfish/v1/$metadata#ActionResponse.ActionResponse",
 		"@odata.type":    "#ActionResponse.v1_0_0.ActionResponse",
@@ -1293,7 +1293,7 @@ func (s *Server) handleBootUpdate(w http.ResponseWriter, r *http.Request, system
 	// Return the updated resource with proper headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", system.OdataEtag)
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	w.WriteHeader(http.StatusOK)
 	s.encodeJSONResponse(w, system)
 }
@@ -1335,7 +1335,7 @@ func (s *Server) handleManagerCollection(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Set appropriate cache headers for collections
-	s.setCacheHeaders(w, "collection")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, collection)
 }
 
@@ -1416,7 +1416,7 @@ func (s *Server) handleManager(w http.ResponseWriter, r *http.Request) {
 	// Return the manager resource with proper headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", manager["@odata.etag"].(string))
-	s.setCacheHeaders(w, "resource")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, manager)
 }
 
@@ -1465,7 +1465,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	// Return the task resource with proper headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", redfishTask.OdataEtag)
-	s.setCacheHeaders(w, "task")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, redfishTask)
 }
 
@@ -1533,7 +1533,7 @@ func (s *Server) handlePowerAction(w http.ResponseWriter, r *http.Request, syste
 		responseSystemID := config.GenerateSystemID(cfg.SystemIDConvention, namespace, vmName)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		s.setCacheHeaders(w, "action")
+		s.setNoCacheHeaders(w)
 		s.encodeJSONResponse(w, map[string]interface{}{
 			"@odata.context": "/redfish/v1/$metadata#ActionResponse.ActionResponse",
 			"@odata.type":    "#ActionResponse.v1_0_0.ActionResponse",
@@ -1568,7 +1568,7 @@ func (s *Server) handlePowerAction(w http.ResponseWriter, r *http.Request, syste
 	// Return success response with proper Redfish format
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	s.setCacheHeaders(w, "action")
+	s.setNoCacheHeaders(w)
 	s.encodeJSONResponse(w, map[string]interface{}{
 		"@odata.context": "/redfish/v1/$metadata#ActionResponse.ActionResponse",
 		"@odata.type":    "#ActionResponse.v1_0_0.ActionResponse",
@@ -1707,30 +1707,14 @@ func (s *Server) sendJSON(w http.ResponseWriter, data interface{}) {
 	s.encodeJSONResponse(w, data)
 }
 
-// setCacheHeaders sets appropriate Cache-Control headers based on resource type.
-// It helps clients understand how to cache different types of resources.
+// setNoCacheHeaders marks the response as not cacheable.
+// Redfish responses are filtered per user (chassis access), so neither
+// shared caches nor local caches must store and reuse them.
 //
 // Parameters:
 // - w: HTTP response writer
-// - resourceType: Type of resource (e.g., "collection", "resource", "task")
-func (s *Server) setCacheHeaders(w http.ResponseWriter, resourceType string) {
-	switch resourceType {
-	case "collection":
-		// Collections can be cached for a short time
-		w.Header().Set("Cache-Control", "public, max-age=30")
-	case "resource":
-		// Individual resources can be cached longer but should revalidate
-		w.Header().Set("Cache-Control", "public, max-age=300, must-revalidate")
-	case "task":
-		// Tasks should not be cached as they change frequently
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	case "action":
-		// Action responses should not be cached
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	default:
-		// Default: moderate caching with revalidation
-		w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
-	}
+func (s *Server) setNoCacheHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 }
 
 // sendRedfishError sends a Redfish error response with proper logging
