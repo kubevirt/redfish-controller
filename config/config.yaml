@@ -30,6 +30,15 @@ authentication:
       password: "user123"                           # Password for the Redfish chassis (chassis-1)
       chassis: ["chassis-1"]
 
+  # Brute-force protection for authentication attempts. Enabled by default;
+  # disable it explicitly when the server runs behind a reverse proxy that
+  # already rate-limits authentication attempts.
+  rate_limiting:
+    enabled: true
+    max_attempts: 10     # Failed attempts per window before blocking
+    window: 5m           # Counting window
+    block_duration: 15m  # How long a blocked address stays blocked
+
 cdi:
   upload_proxy:
     service_name: "cdi-uploadproxy"                 # CDI upload proxy service name

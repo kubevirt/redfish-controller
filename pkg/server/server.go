@@ -317,6 +317,10 @@ func (s *Server) UpdateConfig(newConfig *config.Config) {
 	s.config = newConfig
 	s.configMutex.Unlock()
 
+	// Apply the new rate limiting settings to the authentication middleware
+	// so hot-reloads take effect without a restart
+	s.enhancedAuthMiddleware.ApplyRateLimitConfig(newConfig.Auth.RateLimiting)
+
 	logger.Info("Configuration hot-reloaded successfully")
 
 	if !newConfig.Server.TestMode && s.kubevirtClient != nil {

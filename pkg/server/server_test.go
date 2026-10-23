@@ -1429,6 +1429,88 @@ func TestHandleManager(t *testing.T) {
 	})
 }
 
+// TestServerUpdateConfigRateLimiting verifies that hot-reloading the
+// configuration applies new rate limiting settings to the authentication
+// middleware, so changes take effect without a restart.
+func TestServerUpdateConfigRateLimiting(t *testing.T) {
+	base := func(rl config.RateLimitingConfig) *config.Config {
+		return &config.Config{
+			Server: config.ServerConfig{Host: "localhost", Port: 8080, TestMode: true},
+			Auth: config.AuthConfig{
+				Users: []config.UserConfig{
+					{
+						Username: "testuser",
+						Password: "testpass",
+						Chassis:  []string{"chassis1"},
+					},
+				},
+				RateLimiting: rl,
+			},
+			Chassis: []config.ChassisConfig{
+				{
+					Name:      "chassis1",
+					Namespace: "default",
+				},
+			},
+		}
+	}
+
+	server := NewServer(base(config.RateLimitingConfig{Enabled: &[]bool{false}[0]}), &kubevirt.Client{})
+
+	if enabled, _, _, _ := server.enhancedAuthMiddleware.RateLimitSettings(); enabled {
+		t.Fatal("Rate limiting should start disabled")
+	}
+
+	// Hot-reload a different rate-limit configuration
+	server.UpdateConfig(base(config.RateLimitingConfig{
+		Enabled:       &[]bool{true}[0],
+		MaxAttempts:   2,
+		Window:        time.Minute,
+		BlockDuration: 30 * time.Second,
+	}))
+
+	mw := server.enhancedAuthMiddleware
+	enabled, maxAttempts, window, blockDuration := mw.RateLimitSettings()
+	if !enabled {
+		t.Error("Reload should enable rate limiting")
+	}
+	if maxAttempts != 2 {
+		t.Errorf("Expected maxAttempts 2 after reload, got %d", maxAttempts)
+	}
+	if window != time.Minute {
+		t.Errorf("Expected rateLimitWindow 1m after reload, got %v", window)
+	}
+	if blockDuration != 30*time.Second {
+		t.Errorf("Expected blockDuration 30s after reload, got %v", blockDuration)
+	}
+
+	// End-to-end: the reloaded limiter blocks and reports the new duration
+	handler := mw.Authenticate(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	doFailedAuth := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/redfish/v1/Chassis/chassis1", nil)
+		req.Header.Set("Authorization", "Basic d3Jvbmc6d3Jvbmc=") // wrong:wrong
+		w := httptest.NewRecorder()
+		handler(w, req)
+		return w
+	}
+
+	for i := 0; i < maxAttempts; i++ {
+		if w := doFailedAuth(); w.Code != http.StatusUnauthorized {
+			t.Fatalf("Attempt %d: expected 401, got %d", i+1, w.Code)
+		}
+	}
+
+	w := doFailedAuth()
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("Expected 429 after reload, got %d", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "30" {
+		t.Errorf("Expected Retry-After 30 after reload, got %s", got)
+	}
+}
+
 // TestHandleTask tests the handleTask HTTP handler
 func TestHandleTask(t *testing.T) {
 	server := testServer(t)
