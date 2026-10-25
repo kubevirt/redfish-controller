@@ -2201,6 +2201,37 @@ func (c *Client) SetPowerAfterImportLabel(namespace, name, powerState string) er
 	return nil
 }
 
+// ClearPowerAfterImportLabel withdraws a deferred power command. A VM without
+// the label is left as it is; a missing VM is an error.
+func (c *Client) ClearPowerAfterImportLabel(namespace, name string) error {
+	vm, err := c.GetVM(namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get VM %s/%s: %w", namespace, name, err)
+	}
+	powerCommand := vm.GetLabels()[PowerAfterImportLabel]
+	if powerCommand == "" {
+		return nil
+	}
+
+	patchJSON := fmt.Sprintf(`{"metadata":{"labels":{%q:null}}}`, PowerAfterImportLabel)
+
+	gvr := schema.GroupVersionResource{
+		Group:    "kubevirt.io",
+		Version:  "v1",
+		Resource: "virtualmachines",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	_, err = c.dynamicClient.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.MergePatchType, []byte(patchJSON), metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to remove power-after-import label from VM %s/%s: %w", namespace, name, err)
+	}
+	logger.Info("Withdrew deferred power command %s from VM %s/%s", powerCommand, namespace, name)
+	return nil
+}
+
 // resourceMustParse is a helper for resource.Quantity
 func resourceMustParse(s string) resource.Quantity {
 	q, _ := resource.ParseQuantity(s)

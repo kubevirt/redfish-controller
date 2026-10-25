@@ -1477,6 +1477,16 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 // - w: HTTP response writer
 // - r: HTTP request
 // - systemName: Name of the system to perform the action on
+// powerStateStartsVM reports whether a reset type leaves the VM running, which
+// is what has to wait for a pending ISO import.
+func powerStateStartsVM(state string) bool {
+	switch state {
+	case "On", "ForceRestart", "GracefulRestart":
+		return true
+	}
+	return false
+}
+
 func (s *Server) handlePowerAction(w http.ResponseWriter, r *http.Request, systemName string) {
 	// Parse the request body
 	var resetRequest redfish.ResetRequest
@@ -1519,6 +1529,18 @@ func (s *Server) handlePowerAction(w http.ResponseWriter, r *http.Request, syste
 		logger.Error("Failed to check import status for VM %s/%s: %v", namespace, vmName, importErr)
 		s.sendInternalError(w, fmt.Sprintf("Failed to check import status: %v", importErr))
 		return
+	}
+
+	// Only an action that would start the VM waits for the import. A power-off
+	// runs at once and withdraws a deferred power-on: the host was told to be
+	// off, so it must not start when the import finishes.
+	if importing && !powerStateStartsVM(powerState) {
+		if clearErr := s.kubevirtClient.ClearPowerAfterImportLabel(namespace, vmName); clearErr != nil {
+			logger.Error("Failed to withdraw deferred power command for VM %s/%s: %v", namespace, vmName, clearErr)
+			s.sendInternalError(w, fmt.Sprintf("Failed to withdraw deferred power action: %v", clearErr))
+			return
+		}
+		importing = false
 	}
 
 	if importing {
