@@ -1658,11 +1658,15 @@ func (c *Client) CheckInsertedMedia(namespace, name, mediaID, imageURL string) (
 			}
 		}
 	}
-	if !hasPVC {
+	// An accepted insert whose job has not run yet has the importing label
+	// (a placeholder) but no PVC; it counts as inserted so a retried request
+	// does not queue a second job.
+	importing := vm.GetLabels()[ImportingLabelPrefix+mediaID] != ""
+	if !hasPVC && !importing {
 		return MediaStateNone, nil
 	}
 
-	// A PVC is attached. Compare the stored URL.
+	// Media is attached or on its way. Compare the stored URL.
 	annotationKey := VirtualMediaURLAnnotationPrefix + mediaID
 	storedURL := vm.GetAnnotations()[annotationKey]
 
@@ -1670,9 +1674,7 @@ func (c *Client) CheckInsertedMedia(namespace, name, mediaID, imageURL string) (
 		return MediaStateConflict, nil
 	}
 
-	// Same URL — check whether import is still in progress.
-	labelKey := ImportingLabelPrefix + mediaID
-	if vm.GetLabels()[labelKey] != "" {
+	if importing {
 		return MediaStateImporting, nil
 	}
 
@@ -3679,6 +3681,10 @@ func (c *Client) removeImportingLabel(namespace, vmName, deviceName string) erro
 // reconcileExistingImportPods handles import pods that reached terminal state while the watcher was not running
 func (c *Client) reconcileExistingImportPods(namespace string) error {
 	logger.Info("Reconciling existing import pods in namespace %s", namespace)
+
+	if err := c.reconcileStalePendingImports(namespace, time.Now()); err != nil {
+		logger.Error("Failed to reconcile pending imports in namespace %s: %v", namespace, err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()

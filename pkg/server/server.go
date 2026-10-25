@@ -1026,6 +1026,24 @@ func (s *Server) handleInsertVirtualMedia(w http.ResponseWriter, r *http.Request
 			))
 			return
 		}
+
+		// Ironic sends Power On right after this request is answered, and the
+		// queued job only labels the VM once it has created the import pod.
+		// Mark the VM now so that power-on is deferred until the import is done.
+		marked, err := s.kubevirtClient.MarkImportPending(namespace, vmName, internalMediaID, insertRequest.Image)
+		if err != nil {
+			logger.Error("Failed to mark pending import for VM %s/%s: %v", namespace, vmName, err)
+			s.sendInternalError(w, "Failed to record virtual media insertion")
+			return
+		}
+		if !marked {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			s.encodeJSONResponse(w, map[string]string{
+				"Message": "Virtual media import is still in progress",
+			})
+			return
+		}
 	}
 
 	// Create a task for this operation
