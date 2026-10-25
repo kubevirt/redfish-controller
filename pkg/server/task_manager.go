@@ -303,7 +303,7 @@ func (w *Worker) processVirtualMediaInsert(job *Job) error {
 	imageURL := payload["imageURL"]
 
 	logger.Debug("Worker %d processing virtual media insert - namespace=%s, vmName=%s, mediaID=%s, imageURL=%s",
-		w.ID, namespace, vmName, mediaID, imageURL)
+		w.ID, namespace, vmName, mediaID, logger.RedactURL(imageURL))
 
 	// Update progress
 	logger.Debug("Worker %d updating task progress to 'Starting virtual media insertion'", w.ID)
@@ -515,7 +515,7 @@ func (tm *TaskManager) getAvailableWorker() *Worker {
 // CreateTask creates a new task and queues it for processing
 func (tm *TaskManager) CreateTask(name, namespace, vmName, mediaID, imageURL string) string {
 	logger.Debug("Creating task for virtual media insertion - name=%s, namespace=%s, vmName=%s, mediaID=%s, imageURL=%s",
-		name, namespace, vmName, mediaID, imageURL)
+		name, namespace, vmName, mediaID, logger.RedactURL(imageURL))
 
 	tm.taskMutex.Lock()
 	defer tm.taskMutex.Unlock()

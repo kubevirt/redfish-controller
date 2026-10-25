@@ -1573,7 +1573,7 @@ func (c *Client) IsVirtualMediaInserted(namespace, name, mediaID string) (bool, 
 
 // downloadISO downloads an ISO file to a temporary directory
 func (c *Client) downloadISO(imageURL string) (string, error) {
-	logger.Info("Downloading ISO from %s to temporary directory", imageURL)
+	logger.Info("Downloading ISO from %s to temporary directory", logger.RedactURL(imageURL))
 
 	// Create temp directory
 	tempDir, err := os.MkdirTemp("/tmp", "kubevirt-redfish-iso-*")
@@ -1681,8 +1681,8 @@ func (c *Client) CheckInsertedMedia(namespace, name, mediaID, imageURL string) (
 
 // InsertVirtualMedia inserts virtual media into a VirtualMachine
 func (c *Client) InsertVirtualMedia(namespace, name, mediaID, imageURL string) error {
-	logger.Info("Inserting virtual media %s with image %s for VM %s/%s", mediaID, imageURL, namespace, name)
-	logger.Debug("InsertVirtualMedia called - namespace=%s, name=%s, mediaID=%s, imageURL=%s", namespace, name, mediaID, imageURL)
+	logger.Info("Inserting virtual media %s with image %s for VM %s/%s", mediaID, logger.RedactURL(imageURL), namespace, name)
+	logger.Debug("InsertVirtualMedia called - namespace=%s, name=%s, mediaID=%s, imageURL=%s", namespace, name, mediaID, logger.RedactURL(imageURL))
 
 	// Perform the actual insertion work
 	logger.Debug("Calling insertVirtualMediaAsync for VM %s/%s", namespace, name)
@@ -1698,7 +1698,7 @@ func (c *Client) InsertVirtualMedia(namespace, name, mediaID, imageURL string) e
 
 // insertVirtualMediaAsync performs the actual virtual media insertion work
 func (c *Client) insertVirtualMediaAsync(namespace, name, mediaID, imageURL string) error {
-	logger.Debug("insertVirtualMediaAsync called - namespace=%s, name=%s, mediaID=%s, imageURL=%s", namespace, name, mediaID, imageURL)
+	logger.Debug("insertVirtualMediaAsync called - namespace=%s, name=%s, mediaID=%s, imageURL=%s", namespace, name, mediaID, logger.RedactURL(imageURL))
 
 	// Get DataVolume configuration first to determine timeouts
 	storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := c.getDataVolumeConfig()
@@ -1717,14 +1717,19 @@ func (c *Client) insertVirtualMediaAsync(namespace, name, mediaID, imageURL stri
 	ctx, cancel := context.WithTimeout(context.Background(), vmUpdateDuration)
 	defer cancel()
 
-	logger.Info("Inserting virtual media %s with image %s for VM %s/%s", mediaID, imageURL, namespace, name)
+	logger.Info("Inserting virtual media %s with image %s for VM %s/%s", mediaID, logger.RedactURL(imageURL), namespace, name)
 	logger.Debug("Starting virtual media insertion process for VM %s/%s", namespace, name)
 
 	// Parse URL to determine scheme
 	u, parseErr := url.Parse(imageURL)
 	if parseErr != nil {
-		logger.Error("Failed to parse URL %s: %v", imageURL, parseErr)
-		return fmt.Errorf("failed to parse URL %s: %w", imageURL, parseErr)
+		// A *url.Error repeats the input, and the error ends up in the log and
+		// in the task message; keep only the reason.
+		if urlErr, ok := parseErr.(*url.Error); ok {
+			parseErr = urlErr.Err
+		}
+		logger.Error("Failed to parse image URL %s: %v", logger.RedactURL(imageURL), parseErr)
+		return fmt.Errorf("failed to parse image URL %s: %w", logger.RedactURL(imageURL), parseErr)
 	}
 	logger.Debug("Parsed URL - scheme=%s, host=%s", u.Scheme, u.Host)
 
@@ -2019,7 +2024,7 @@ func (c *Client) insertVirtualMediaAsync(namespace, name, mediaID, imageURL stri
 // The pod spec is built based on the PVC's volume mode: Block uses dd to a raw device,
 // Filesystem uses a direct curl download to a mounted path.
 func (c *Client) copyISOToPVC(namespace, dataVolumeName, imageURL, isoDownloadTimeout, vmName, deviceName string) error {
-	logger.Info("Copying ISO from %s to PVC for DataVolume %s", imageURL, dataVolumeName)
+	logger.Info("Copying ISO from %s to PVC for DataVolume %s", logger.RedactURL(imageURL), dataVolumeName)
 
 	_, _, _, _, configISODownloadTimeout, helperImage := c.getDataVolumeConfig()
 
