@@ -165,6 +165,18 @@ type ChassisCollection struct {
 	MembersCount int    `json:"Members@odata.count"`
 }
 
+// ManagerCollection represents a collection of managers.
+// This is returned when querying /redfish/v1/Managers and contains links
+// to the managers (one per chassis) the requesting user can access.
+type ManagerCollection struct {
+	OdataContext string `json:"@odata.context"`
+	OdataID      string `json:"@odata.id"`
+	OdataType    string `json:"@odata.type"`
+	Name         string `json:"Name"`
+	Members      []Link `json:"Members"`
+	MembersCount int    `json:"Members@odata.count"`
+}
+
 // Chassis represents a Redfish chassis resource.
 // In the KubeVirt Redfish implementation, chassis represent Kubernetes namespaces
 // and provide namespace isolation for virtual machines.
