@@ -757,3 +757,42 @@ func TestSystemDevices_StorageAndNICsFollowTheVMI(t *testing.T) {
 	assert.Equal(t, http.StatusOK, getSystemPath(srv, "/redfish/v1/Systems/vm-1/Storage/1/Drives/hotplugged").Code)
 	assert.EqualValues(t, 2, getJSON(t, srv, "/redfish/v1/Systems/vm-1/EthernetInterfaces")["Members@odata.count"])
 }
+
+// The ComputerSystem names the node a running VM is scheduled on, so an
+// inventory that also holds the nodes can link a VM to its host.
+func TestSystemNodeName(t *testing.T) {
+	kubeVirtOem := func(t *testing.T, srv *Server) map[string]interface{} {
+		t.Helper()
+		oem, ok := getJSON(t, srv, "/redfish/v1/Systems/vm-1")["Oem"].(map[string]interface{})
+		require.True(t, ok, "the System has an Oem")
+		return oem["KubeVirt"].(map[string]interface{})
+	}
+
+	t.Run("a running VM reports its node next to the vCPU layout", func(t *testing.T) {
+		vmi := vmiOf(kubevirtv1.VirtualMachineInstanceSpec{}, kubevirtv1.VirtualMachineInstanceStatus{
+			Phase: kubevirtv1.Running, NodeName: "worker-3"})
+		kv := kubeVirtOem(t, newDevicesTestServerWith(t, "", vmi, nil))
+		assert.Equal(t, "worker-3", kv["NodeName"])
+		assert.Contains(t, kv, "Processors")
+	})
+
+	t.Run("a stopped VM has no node", func(t *testing.T) {
+		kv := kubeVirtOem(t, newDevicesTestServerWith(t, "", nil, nil))
+		assert.NotContains(t, kv, "NodeName")
+		assert.Contains(t, kv, "Processors", "the vCPU layout comes from the VM spec")
+	})
+
+	t.Run("a VMI in a final phase is not where the VM runs", func(t *testing.T) {
+		vmi := vmiOf(kubevirtv1.VirtualMachineInstanceSpec{}, kubevirtv1.VirtualMachineInstanceStatus{
+			Phase: kubevirtv1.Succeeded, NodeName: "worker-3"})
+		assert.NotContains(t, kubeVirtOem(t, newDevicesTestServerWith(t, "", vmi, nil)), "NodeName")
+	})
+
+	t.Run("an unreadable VMI leaves the node out and the system still answers", func(t *testing.T) {
+		forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "virtualmachineinstances"}, "vm-1", errors.New("no access"))
+		srv := newDevicesTestServerWith(t, "", nil, nil, failVMIReads(forbidden))
+		w := getSystemPath(srv, "/redfish/v1/Systems/vm-1")
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.NotContains(t, w.Body.String(), "NodeName")
+	})
+}

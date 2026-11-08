@@ -252,11 +252,14 @@ While your deployment is starting to deploy in the background, you can explore t
            "Sockets": 1,
            "CoresPerSocket": 20,
            "ThreadsPerCore": 1
-         }
+         },
+         "NodeName": "worker-3"
        }
      }
    }
    ```
+
+   `Oem.KubeVirt.NodeName` is the node the running VMI is scheduled on (`status.nodeName`); it is omitted while the VM is stopped and changes when the VM is live-migrated.
 
 3. **Review the Hardware of a Managed System**
 

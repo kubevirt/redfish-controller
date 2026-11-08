@@ -139,15 +139,20 @@ type ProcessorSummary struct {
 	Model string `json:"Model,omitempty"`
 }
 
-// SystemOem carries vendor extensions of a ComputerSystem.
+// SystemOem carries vendor extensions of a ComputerSystem. NodeName is the
+// Kubernetes node a running VM is scheduled on; omitted when it is not running.
 type SystemOem struct {
 	KubeVirt struct {
-		Processors struct {
-			Sockets        int `json:"Sockets"`
-			CoresPerSocket int `json:"CoresPerSocket"`
-			ThreadsPerCore int `json:"ThreadsPerCore"`
-		} `json:"Processors"`
+		Processors *OemProcessors `json:"Processors,omitempty"`
+		NodeName   string         `json:"NodeName,omitempty"`
 	} `json:"KubeVirt"`
+}
+
+// OemProcessors is the vCPU layout the standard ProcessorSummary counts are derived from.
+type OemProcessors struct {
+	Sockets        int `json:"Sockets"`
+	CoresPerSocket int `json:"CoresPerSocket"`
+	ThreadsPerCore int `json:"ThreadsPerCore"`
 }
 
 // Boot represents boot configuration for a computer system.

@@ -302,9 +302,30 @@ func processorSummary(cpu kubevirt.CPUTopology) redfish.ProcessorSummary {
 // lives in the system-level Oem.
 func systemOem(cpu kubevirt.CPUTopology) *redfish.SystemOem {
 	oem := &redfish.SystemOem{}
-	oem.KubeVirt.Processors.Sockets = cpu.Sockets
-	oem.KubeVirt.Processors.CoresPerSocket = cpu.Cores
-	oem.KubeVirt.Processors.ThreadsPerCore = cpu.Threads
+	oem.KubeVirt.Processors = &redfish.OemProcessors{
+		Sockets:        cpu.Sockets,
+		CoresPerSocket: cpu.Cores,
+		ThreadsPerCore: cpu.Threads,
+	}
+	return oem
+}
+
+// withNodeName adds the node a running VM is scheduled on to the ComputerSystem
+// Oem, creating it if the vCPU layout left it nil. A stopped VM, or one whose VMI
+// cannot be read, gets no node name; the System still answers.
+func (s *Server) withNodeName(oem *redfish.SystemOem, namespace, vmName string) *redfish.SystemOem {
+	node, err := s.kubevirtClient.GetVMNodeName(namespace, vmName)
+	if err != nil {
+		logger.Error("Failed to get the node of VM %s/%s, leaving it out of the response: %v", namespace, vmName, err)
+		return oem
+	}
+	if node == "" {
+		return oem
+	}
+	if oem == nil {
+		oem = &redfish.SystemOem{}
+	}
+	oem.KubeVirt.NodeName = node
 	return oem
 }
 

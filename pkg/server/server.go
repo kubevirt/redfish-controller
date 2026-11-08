@@ -758,6 +758,7 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 
 	// Get real CPU information
 	procSummary, sysOem := s.processorFields(namespace, vmName)
+	sysOem = s.withNodeName(sysOem, namespace, vmName)
 
 	// Generate the correct System ID for the response
 	responseSystemID := config.GenerateSystemID(s.currentConfig().SystemIDConvention, namespace, vmName)
@@ -1281,6 +1282,7 @@ func (s *Server) handleBootUpdate(w http.ResponseWriter, r *http.Request, system
 
 	// Get real CPU information
 	procSummary, sysOem := s.processorFields(namespace, vmName)
+	sysOem = s.withNodeName(sysOem, namespace, vmName)
 
 	// Return the updated ComputerSystem resource (Redfish spec requirement)
 	responseSystemID := config.GenerateSystemID(s.currentConfig().SystemIDConvention, namespace, vmName)
