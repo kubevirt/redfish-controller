@@ -186,6 +186,10 @@ While your deployment is starting to deploy in the background, you can explore t
      "Id": "ztp-jinkit-kvm-00",
      "Name": "ztp-jinkit-kvm-00",
      "SystemType": "Virtual",
+     "Manufacturer": "KubeVirt",
+     "Model": "pc-q35-rhel9.6.0",
+     "SerialNumber": "558c60aa-f0d8-45b3-bd1c-d0bfc4ee7c9d",
+     "UUID": "f5df47fc-9203-4e65-ba1e-21fd6cc79d3f",
      "Status": {
        "State": "Enabled",
        "Health": "OK"
@@ -257,6 +261,8 @@ While your deployment is starting to deploy in the background, you can explore t
      }
    }
    ```
+
+   `SerialNumber` and `UUID` are the VM's SMBIOS `firmware.serial` and `firmware.uuid` (the UUID falls back to the VM's `metadata.uid`), and `Model` is its QEMU machine type, each read from the running VMI first and the VM template second; a field nothing declares is omitted.
 
 3. **Review the Hardware of a Managed System**
 

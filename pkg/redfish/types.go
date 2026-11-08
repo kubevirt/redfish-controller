@@ -89,6 +89,8 @@ type ComputerSystemCollection struct {
 // ComputerSystem represents a computer system (virtual machine).
 // This is the main resource type for representing KubeVirt VMs in the Redfish API.
 // It includes power state, status, memory information, CPU details, and available actions.
+// SerialNumber, UUID and Model (the QEMU machine type) are omitted when the VM
+// cannot be read or declares none.
 type ComputerSystem struct {
 	OdataContext       string            `json:"@odata.context"`
 	OdataID            string            `json:"@odata.id"`
@@ -97,6 +99,10 @@ type ComputerSystem struct {
 	ID                 string            `json:"Id"`
 	Name               string            `json:"Name"`
 	SystemType         string            `json:"SystemType"`
+	Manufacturer       string            `json:"Manufacturer,omitempty"`
+	Model              string            `json:"Model,omitempty"`
+	SerialNumber       string            `json:"SerialNumber,omitempty"`
+	UUID               string            `json:"UUID,omitempty"`
 	Status             Status            `json:"Status"`
 	PowerState         string            `json:"PowerState"`
 	MemorySummary      MemorySummary     `json:"MemorySummary"`

@@ -277,3 +277,54 @@ func (c *Client) GetVMNICs(namespace, name string) ([]VMNIC, error) {
 	}
 	return nics, nil
 }
+
+// VMIdentity is what a VM reports about itself as a machine: the SMBIOS
+// system serial number and UUID, and the QEMU machine type. Each field is
+// empty when nothing declares it.
+type VMIdentity struct {
+	Serial      string
+	UUID        string
+	MachineType string
+}
+
+// GetVMIdentity returns the serial number, UUID and machine type of a VM.
+// Each field is read from the running VMI first (the values the guest sees,
+// including the defaults KubeVirt filled in at start), then from the VM
+// template. A VM that declares no firmware UUID reports its Kubernetes UID
+// instead, so a stopped VM still has a stable UUID.
+func (c *Client) GetVMIdentity(namespace, name string) (VMIdentity, error) {
+	vm, err := c.GetVM(namespace, name)
+	if err != nil {
+		return VMIdentity{}, fmt.Errorf("failed to get VM %s/%s for identity lookup: %w", namespace, name, err)
+	}
+	vmi, err := c.getRunningVMI(namespace, name)
+	if err != nil {
+		return VMIdentity{}, fmt.Errorf("failed to get VMI %s/%s for identity lookup: %w", namespace, name, err)
+	}
+
+	var id VMIdentity
+	specs := []*kubevirtv1.VirtualMachineInstanceSpec{effectiveSpec(vm, vmi)}
+	if vm.Spec.Template != nil {
+		specs = append(specs, &vm.Spec.Template.Spec)
+	}
+	for _, spec := range specs {
+		if spec == nil {
+			continue
+		}
+		if fw := spec.Domain.Firmware; fw != nil {
+			if id.Serial == "" {
+				id.Serial = fw.Serial
+			}
+			if id.UUID == "" {
+				id.UUID = string(fw.UUID)
+			}
+		}
+		if m := spec.Domain.Machine; m != nil && id.MachineType == "" {
+			id.MachineType = m.Type
+		}
+	}
+	if id.UUID == "" {
+		id.UUID = string(vm.UID)
+	}
+	return id, nil
+}

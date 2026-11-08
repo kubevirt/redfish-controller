@@ -43,6 +43,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -756,4 +757,101 @@ func TestSystemDevices_StorageAndNICsFollowTheVMI(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, getSystemPath(srv, "/redfish/v1/Systems/vm-1/Storage/1/Drives/data").Code, "staged in the VM only")
 	assert.Equal(t, http.StatusOK, getSystemPath(srv, "/redfish/v1/Systems/vm-1/Storage/1/Drives/hotplugged").Code)
 	assert.EqualValues(t, 2, getJSON(t, srv, "/redfish/v1/Systems/vm-1/EthernetInterfaces")["Members@odata.count"])
+}
+
+// withVM edits the fixed VM "vm-1" before the server is built. Pass it before
+// any wrapper that hides the mock (failVMIReads).
+func withVM(t *testing.T, mutate func(vm *kubevirtv1.VirtualMachine)) func(dynamic.Interface) dynamic.Interface {
+	return func(d dynamic.Interface) dynamic.Interface {
+		mock, ok := d.(*kubevirt.MockDynamicClient)
+		require.True(t, ok, "withVM must wrap the mock itself")
+		vm, err := mock.GetVM("ns", "vm-1")
+		require.NoError(t, err)
+		mutate(vm)
+		require.NoError(t, mock.AddVM(vm))
+		return d
+	}
+}
+
+// The ComputerSystem identifies the VM as a machine: SMBIOS serial and UUID,
+// machine type as Model. A collector correlates VMs across runs on these.
+func TestSystemIdentity(t *testing.T) {
+	const uid = "0b5b3a3e-1c1f-4c4e-9d55-7a2f3f9d0c11"
+	declare := func(serial, uuid, machine string) func(dynamic.Interface) dynamic.Interface {
+		return withVM(t, func(vm *kubevirtv1.VirtualMachine) {
+			vm.UID = uid
+			d := &vm.Spec.Template.Spec.Domain
+			d.Firmware = &kubevirtv1.Firmware{Serial: serial, UUID: types.UID(uuid)}
+			d.Machine = &kubevirtv1.Machine{Type: machine}
+		})
+	}
+
+	t.Run("declared firmware and machine type are reported", func(t *testing.T) {
+		srv := newDevicesTestServerWith(t, "", nil, nil, declare("SER-1", "11111111-2222-3333-4444-555555555555", "q35"))
+		b := getJSON(t, srv, "/redfish/v1/Systems/vm-1")
+		assert.Equal(t, "KubeVirt", b["Manufacturer"])
+		assert.Equal(t, "q35", b["Model"])
+		assert.Equal(t, "SER-1", b["SerialNumber"])
+		assert.Equal(t, "11111111-2222-3333-4444-555555555555", b["UUID"])
+	})
+
+	t.Run("a running VMI wins over the VM template", func(t *testing.T) {
+		vmi := vmiOf(kubevirtv1.VirtualMachineInstanceSpec{Domain: kubevirtv1.DomainSpec{
+			Firmware: &kubevirtv1.Firmware{Serial: "VMI-SER", UUID: "99999999-8888-7777-6666-555555555555"},
+			Machine:  &kubevirtv1.Machine{Type: "pc-q35-rhel9.6.0"},
+		}}, kubevirtv1.VirtualMachineInstanceStatus{Phase: kubevirtv1.Running})
+		srv := newDevicesTestServerWith(t, "", vmi, nil, declare("SER-1", "11111111-2222-3333-4444-555555555555", "q35"))
+		b := getJSON(t, srv, "/redfish/v1/Systems/vm-1")
+		assert.Equal(t, "pc-q35-rhel9.6.0", b["Model"])
+		assert.Equal(t, "VMI-SER", b["SerialNumber"])
+		assert.Equal(t, "99999999-8888-7777-6666-555555555555", b["UUID"])
+	})
+
+	t.Run("a VMI that leaves a field unset falls back to the template", func(t *testing.T) {
+		vmi := vmiOf(kubevirtv1.VirtualMachineInstanceSpec{}, kubevirtv1.VirtualMachineInstanceStatus{Phase: kubevirtv1.Running})
+		srv := newDevicesTestServerWith(t, "", vmi, nil, declare("SER-1", "", "q35"))
+		b := getJSON(t, srv, "/redfish/v1/Systems/vm-1")
+		assert.Equal(t, "q35", b["Model"])
+		assert.Equal(t, "SER-1", b["SerialNumber"])
+		assert.Equal(t, uid, b["UUID"])
+	})
+
+	t.Run("no firmware: UUID is the VM's UID and there is no serial", func(t *testing.T) {
+		srv := newDevicesTestServerWith(t, "", nil, nil, withVM(t, func(vm *kubevirtv1.VirtualMachine) { vm.UID = uid }))
+		b := getJSON(t, srv, "/redfish/v1/Systems/vm-1")
+		assert.Equal(t, uid, b["UUID"])
+		assert.NotContains(t, b, "SerialNumber", "no serial is invented")
+		assert.NotContains(t, b, "Model", "the VM declares no machine type")
+		assert.Equal(t, "KubeVirt", b["Manufacturer"])
+	})
+
+	t.Run("an unreadable VMI leaves the identity out and the system still answers", func(t *testing.T) {
+		forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "virtualmachineinstances"}, "vm-1", errors.New("no access"))
+		srv := newDevicesTestServerWith(t, "", nil, nil, declare("SER-1", "11111111-2222-3333-4444-555555555555", "q35"), failVMIReads(forbidden))
+		b := getJSON(t, srv, "/redfish/v1/Systems/vm-1")
+		for _, key := range []string{"SerialNumber", "UUID", "Model"} {
+			assert.NotContains(t, b, key, "a value the running VM may not have is not guessed from the template")
+		}
+		assert.Equal(t, "KubeVirt", b["Manufacturer"], "the manufacturer is not read from the cluster")
+	})
+
+	t.Run("an unreadable VM gives the zero identity", func(t *testing.T) {
+		srv := newDevicesTestServer(t, "")
+		assert.Equal(t, kubevirt.VMIdentity{}, srv.identityFields("ns", "does-not-exist"))
+	})
+
+	t.Run("the boot PATCH response carries the identity too", func(t *testing.T) {
+		srv := newDevicesTestServerWith(t, "", nil, nil, declare("SER-1", "11111111-2222-3333-4444-555555555555", "q35"))
+		req := httptest.NewRequest("PATCH", "/redfish/v1/Systems/vm-1", strings.NewReader(`{"Boot": {"BootSourceOverrideTarget": "Hdd", "BootSourceOverrideEnabled": "Continuous"}}`))
+		req = req.WithContext(logger.WithAuth(req.Context(), &auth.AuthContext{User: &auth.User{Username: "u", Chassis: []string{"c"}}}))
+		w := httptest.NewRecorder()
+		srv.handleSystem(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var b map[string]interface{}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &b))
+		assert.Equal(t, "SER-1", b["SerialNumber"])
+		assert.Equal(t, "11111111-2222-3333-4444-555555555555", b["UUID"])
+		assert.Equal(t, "q35", b["Model"])
+		assert.Equal(t, "KubeVirt", b["Manufacturer"])
+	})
 }

@@ -731,13 +731,6 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get real power state
-	powerState, err := s.kubevirtClient.GetVMPowerState(namespace, vmName)
-	if err != nil {
-		logger.Error("Failed to get power state for VM %s: %v", vmName, err)
-		powerState = "Unknown"
-	}
-
 	// Get real boot options
 	bootOptions, err := s.kubevirtClient.GetVMBootOptions(namespace, vmName)
 	if err != nil {
@@ -747,6 +740,27 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 			"bootSourceOverrideTarget":  "None",
 			"bootSourceOverrideMode":    "UEFI",
 		}
+	}
+
+	system := s.buildComputerSystem(namespace, vmName, chassisName, bootOptions)
+
+	// Return the resource with proper Redfish headers
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("ETag", system.OdataEtag)
+	s.setNoCacheHeaders(w)
+	s.encodeJSONResponse(w, system)
+}
+
+// buildComputerSystem reads a VM and builds its ComputerSystem resource. It is
+// shared by GET and by the response to a boot PATCH, which passes the boot
+// options it read back after its own write. A value that cannot be read is
+// reported as unknown or left out; it never fails the request.
+func (s *Server) buildComputerSystem(namespace, vmName, chassisName string, bootOptions map[string]interface{}) redfish.ComputerSystem {
+	// Get real power state
+	powerState, err := s.kubevirtClient.GetVMPowerState(namespace, vmName)
+	if err != nil {
+		logger.Error("Failed to get power state for VM %s: %v", vmName, err)
+		powerState = "Unknown"
 	}
 
 	// Get real memory information
@@ -759,11 +773,12 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	// Get real CPU information
 	procSummary, sysOem := s.processorFields(namespace, vmName)
 
+	identity := s.identityFields(namespace, vmName)
+
 	// Generate the correct System ID for the response
 	responseSystemID := config.GenerateSystemID(s.currentConfig().SystemIDConvention, namespace, vmName)
 
-	// Return the ComputerSystem resource
-	system := redfish.ComputerSystem{
+	return redfish.ComputerSystem{
 		OdataContext: "/redfish/v1/$metadata#ComputerSystem.ComputerSystem",
 		OdataID:      fmt.Sprintf("/redfish/v1/Systems/%s", responseSystemID),
 		OdataType:    "#ComputerSystem.v1_15_0.ComputerSystem",
@@ -771,6 +786,10 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 		ID:           responseSystemID,
 		Name:         vmName, // Name remains vmName
 		SystemType:   "Virtual",
+		Manufacturer: "KubeVirt",
+		Model:        identity.MachineType,
+		SerialNumber: identity.Serial,
+		UUID:         identity.UUID,
 		Status: redfish.Status{
 			State:  "Enabled",
 			Health: "OK",
@@ -819,12 +838,6 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	}
-
-	// Return the resource with proper Redfish headers
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("ETag", system.OdataEtag)
-	s.setNoCacheHeaders(w)
-	s.encodeJSONResponse(w, system)
 }
 
 // handleVirtualMediaRequest handles virtual media requests within the system handler.
@@ -1265,82 +1278,7 @@ func (s *Server) handleBootUpdate(w http.ResponseWriter, r *http.Request, system
 		}
 	}
 
-	// Get real power state
-	powerState, err := s.kubevirtClient.GetVMPowerState(namespace, vmName)
-	if err != nil {
-		logger.Error("Failed to get power state for VM %s: %v", vmName, err)
-		powerState = "Unknown"
-	}
-
-	// Get real memory information
-	memoryGB, err := s.kubevirtClient.GetVMMemory(namespace, vmName)
-	if err != nil {
-		logger.Warning("Failed to get memory for VM %s: %v", vmName, err)
-		memoryGB = 0 // Unknown: omitted from the response
-	}
-
-	// Get real CPU information
-	procSummary, sysOem := s.processorFields(namespace, vmName)
-
-	// Return the updated ComputerSystem resource (Redfish spec requirement)
-	responseSystemID := config.GenerateSystemID(s.currentConfig().SystemIDConvention, namespace, vmName)
-
-	system := redfish.ComputerSystem{
-		OdataContext: "/redfish/v1/$metadata#ComputerSystem.ComputerSystem",
-		OdataID:      fmt.Sprintf("/redfish/v1/Systems/%s", responseSystemID),
-		OdataType:    "#ComputerSystem.v1_15_0.ComputerSystem",
-		OdataEtag:    fmt.Sprintf("W/\"%d\"", time.Now().Unix()),
-		ID:           responseSystemID,
-		Name:         vmName,
-		SystemType:   "Virtual",
-		Status: redfish.Status{
-			State:  "Enabled",
-			Health: "OK",
-		},
-		PowerState: powerState,
-		MemorySummary: redfish.MemorySummary{
-			TotalSystemMemoryGiB: memoryGB,
-		},
-		Memory: redfish.Link{
-			OdataID: fmt.Sprintf("/redfish/v1/Systems/%s/Memory", responseSystemID),
-		},
-		Processors: redfish.Link{
-			OdataID: fmt.Sprintf("/redfish/v1/Systems/%s/Processors", responseSystemID),
-		},
-		ProcessorSummary: procSummary,
-		Oem:              sysOem,
-		Storage: redfish.Link{
-			OdataID: fmt.Sprintf("/redfish/v1/Systems/%s/Storage", responseSystemID),
-		},
-		EthernetInterfaces: redfish.Link{
-			OdataID: fmt.Sprintf("/redfish/v1/Systems/%s/EthernetInterfaces", responseSystemID),
-		},
-		VirtualMedia: redfish.Link{
-			OdataID: fmt.Sprintf("/redfish/v1/Systems/%s/VirtualMedia", responseSystemID),
-		},
-		Boot: redfish.Boot{
-			BootSourceOverrideEnabled:               bootOptions["bootSourceOverrideEnabled"].(string),
-			BootSourceOverrideTarget:                bootOptions["bootSourceOverrideTarget"].(string),
-			BootSourceOverrideTargetAllowableValues: []string{"Cd", "Hdd"},
-			BootSourceOverrideMode:                  bootOptions["bootSourceOverrideMode"].(string),
-			UefiTargetBootSourceOverride:            "/0x31/0x33/0x01/0x01",
-		},
-		Actions: redfish.Actions{
-			Reset: redfish.ResetAction{
-				Target: fmt.Sprintf("/redfish/v1/Systems/%s/Actions/ComputerSystem.Reset", responseSystemID),
-				ResetType: []string{
-					"On", "ForceOff", "GracefulShutdown", "ForceRestart", "GracefulRestart", "Pause", "Resume",
-				},
-			},
-		},
-		Links: redfish.SystemLinks{
-			ManagedBy: []redfish.Link{
-				{
-					OdataID: fmt.Sprintf("/redfish/v1/Managers/%s", chassisName),
-				},
-			},
-		},
-	}
+	system := s.buildComputerSystem(namespace, vmName, chassisName, bootOptions)
 
 	// Return the updated resource with proper headers
 	w.Header().Set("Content-Type", "application/json")

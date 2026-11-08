@@ -286,6 +286,18 @@ func (s *Server) processorFields(namespace, vmName string) (*redfish.ProcessorSu
 	return &summary, systemOem(cpu)
 }
 
+// identityFields reads the serial number, UUID and machine type of a VM for the
+// ComputerSystem. If they cannot be read it returns the zero value, so the keys
+// are left out of the response and the system itself still answers.
+func (s *Server) identityFields(namespace, vmName string) kubevirt.VMIdentity {
+	id, err := s.kubevirtClient.GetVMIdentity(namespace, vmName)
+	if err != nil {
+		logger.Error("Failed to get identity for VM %s/%s, leaving it out of the response: %v", namespace, vmName, err)
+		return kubevirt.VMIdentity{}
+	}
+	return id
+}
+
 // processorSummary maps a VM's vCPU topology to the Redfish ProcessorSummary.
 func processorSummary(cpu kubevirt.CPUTopology) redfish.ProcessorSummary {
 	return redfish.ProcessorSummary{
