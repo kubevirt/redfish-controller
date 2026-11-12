@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kubevirt/redfish-controller/pkg/kubevirt"
@@ -77,6 +78,7 @@ type TaskManager struct {
 	// Worker pool
 	workers     []*Worker
 	workerCount int
+	nextWorker  uint64 // round-robin cursor for worker selection
 	workerMutex sync.RWMutex
 
 	// KubeVirt client for actual operations
@@ -504,7 +506,17 @@ func (tm *TaskManager) getAvailableWorker() *Worker {
 	tm.workerMutex.RLock()
 	defer tm.workerMutex.RUnlock()
 
-	for _, worker := range tm.workers {
+	if len(tm.workers) == 0 {
+		return nil
+	}
+
+	// Advance the round-robin cursor so consecutive jobs land on different
+	// workers. Without this the dispatcher always returns the first worker
+	// with channel capacity, which serializes all jobs onto worker 1 while
+	// the remaining workers stay idle.
+	start := int(atomic.AddUint64(&tm.nextWorker, 1) % uint64(len(tm.workers)))
+	for i := range len(tm.workers) {
+		worker := tm.workers[(start+i)%len(tm.workers)]
 		// Check if worker's job channel has capacity
 		if len(worker.jobChan) < cap(worker.jobChan) {
 			return worker
