@@ -1558,6 +1558,17 @@ func (c *Client) IsVirtualMediaInserted(namespace, name, mediaID string) (bool, 
 		return false, nil
 	}
 
+	// A bound PVC holds no image while the import is running or after it
+	// failed; the device is not usable media in either case.
+	if vm.GetLabels()[ImportingLabelPrefix+mediaID] != "" {
+		logger.Debug("Virtual media %s of VM %s/%s is still importing", mediaID, namespace, name)
+		return false, nil
+	}
+	if failedPod := vm.GetAnnotations()[ImportFailedAnnotationPrefix+mediaID]; failedPod != "" {
+		logger.Debug("Virtual media %s of VM %s/%s has a failed import (%s)", mediaID, namespace, name, failedPod)
+		return false, nil
+	}
+
 	// Step 4: Check if the PVC is bound and has non-zero size
 	pvcObj, err := c.kubernetesClient.CoreV1().PersistentVolumeClaims(namespace).Get(context.Background(), pvcName, metav1.GetOptions{})
 	if err != nil {
@@ -1676,6 +1687,14 @@ func (c *Client) CheckInsertedMedia(namespace, name, mediaID, imageURL string) (
 	// does not queue a second job.
 	importing := vm.GetLabels()[ImportingLabelPrefix+mediaID] != ""
 	if !hasPVC && !importing {
+		return MediaStateNone, nil
+	}
+
+	// After a failed import the attached PVC holds no image; a new insert
+	// replaces it, so there is nothing to compare the request against. Once
+	// that new insert is accepted the importing label is back, and the marker
+	// only waits for the job to clear it.
+	if !importing && vm.GetAnnotations()[ImportFailedAnnotationPrefix+mediaID] != "" {
 		return MediaStateNone, nil
 	}
 
@@ -1806,6 +1825,7 @@ func (c *Client) insertVirtualMediaAsync(namespace, name, mediaID, imageURL stri
 			annotations = map[string]string{}
 		}
 		annotations[VirtualMediaURLAnnotationPrefix+deviceName] = imageURL
+		delete(annotations, ImportFailedAnnotationPrefix+deviceName)
 		vmCopy.SetAnnotations(annotations)
 
 		// Ironic sends the boot override right after the insert request. When
@@ -2462,6 +2482,7 @@ func (c *Client) EjectVirtualMedia(namespace, name, mediaID string) error {
 
 		annotations := vmCopy.GetAnnotations()
 		delete(annotations, VirtualMediaURLAnnotationPrefix+mediaID)
+		delete(annotations, ImportFailedAnnotationPrefix+mediaID)
 		vmCopy.SetAnnotations(annotations)
 		return nil
 	})
@@ -2907,6 +2928,12 @@ const reconcileInterval = time.Minute
 // VirtualMediaURLAnnotationPrefix is used to record the image URL of currently
 // inserted virtual media. The device name is appended (e.g. "virtual-media.redfish/cdrom0").
 const VirtualMediaURLAnnotationPrefix = "virtual-media.redfish/"
+
+// ImportFailedAnnotationPrefix marks a device whose last ISO import failed
+// (value: the import pod). The PVC is attached but holds no usable image, so
+// the device reads as not inserted and the next InsertMedia imports again.
+// The insert and the eject clear it.
+const ImportFailedAnnotationPrefix = "import-failed.redfish/"
 
 // MediaState describes the state of an already-inserted virtual media device.
 type MediaState int
@@ -3571,9 +3598,48 @@ func (c *Client) handleImportPodCompleted(pod *corev1.Pod) {
 		return
 	}
 
+	if pod.Status.Phase == corev1.PodFailed {
+		if err := c.markImportFailed(vm, deviceName, pod.Name); err != nil {
+			logger.Error("Failed to record the failed import on VM %s/%s: %v", vmNamespace, vmName, err)
+		}
+		return
+	}
+
 	if err := c.removeImportingLabel(vmNamespace, vmName, deviceName); err != nil {
 		logger.Error("Failed to remove importing label from VM %s/%s: %v", vmNamespace, vmName, err)
 	}
+}
+
+// markImportFailed ends a failed import: the importing label comes off, a
+// power command deferred until the import is withdrawn, and the device is
+// marked as failed. All three go in one patch: the VM watcher runs the
+// deferred power command as soon as it sees the label gone, and a VM started
+// on an empty CD-ROM is what the deferral exists to prevent.
+func (c *Client) markImportFailed(vm *kubevirtv1.VirtualMachine, deviceName, podName string) error {
+	namespace, name := vm.GetNamespace(), vm.GetName()
+	deferredPower := vm.GetLabels()[PowerAfterImportLabel]
+
+	patchJSON := fmt.Sprintf(`{"metadata":{"labels":{%q:null,%q:null},"annotations":{%q:%q}}}`,
+		ImportingLabelPrefix+deviceName, PowerAfterImportLabel, ImportFailedAnnotationPrefix+deviceName, podName)
+
+	gvr := schema.GroupVersionResource{
+		Group:    "kubevirt.io",
+		Version:  "v1",
+		Resource: "virtualmachines",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	_, err := c.dynamicClient.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.MergePatchType, []byte(patchJSON), metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to patch VM %s/%s: %w", namespace, name, err)
+	}
+	if deferredPower != "" {
+		logger.Warning("Import of %s into VM %s/%s failed (pod %s); dropped the deferred power command %s", deviceName, namespace, name, podName, deferredPower)
+	} else {
+		logger.Warning("Import of %s into VM %s/%s failed (pod %s); the device reads as not inserted until it is inserted again", deviceName, namespace, name, podName)
+	}
+	return nil
 }
 
 // removeImportingLabel removes the importing.redfish/<deviceName> label from a VM
