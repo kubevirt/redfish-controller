@@ -45,6 +45,7 @@ type MockConfig struct {
 	dataVolumeConfig struct {
 		storageSize        string
 		allowInsecureTLS   bool
+		certConfigMap      string
 		storageClass       string
 		vmUpdateTimeout    string
 		isoDownloadTimeout string
@@ -57,9 +58,10 @@ type MockConfig struct {
 	}
 }
 
-func (m *MockConfig) GetDataVolumeConfig() (string, bool, string, string, string, string) {
+func (m *MockConfig) GetDataVolumeConfig() (string, bool, string, string, string, string, string) {
 	return m.dataVolumeConfig.storageSize,
 		m.dataVolumeConfig.allowInsecureTLS,
+		m.dataVolumeConfig.certConfigMap,
 		m.dataVolumeConfig.storageClass,
 		m.dataVolumeConfig.vmUpdateTimeout,
 		m.dataVolumeConfig.isoDownloadTimeout,
@@ -283,17 +285,20 @@ func TestClient_GetDataVolumeConfig(t *testing.T) {
 		appConfig: nil, // No config provided, should use defaults
 	}
 
-	storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := client.getDataVolumeConfig()
-
+	storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := client.getDataVolumeConfig()
 	// Should return default values
 	if storageSize != "10Gi" {
 		t.Errorf("Expected storage size '10Gi', got '%s'", storageSize)
 	}
 	// allowInsecureTLS can be false by default, but we should still check it's defined
 	_ = allowInsecureTLS   // Use the variable to avoid linter warning
+	_ = certConfigMap      // Use the variable to avoid linter warning
 	_ = storageClass       // Use the variable to avoid linter warning
 	_ = vmUpdateTimeout    // Use the variable to avoid linter warning
 	_ = isoDownloadTimeout // Use the variable to avoid linter warning
+	if certConfigMap != "" {
+		t.Errorf("Expected empty cert config map, got '%s'", certConfigMap)
+	}
 	if helperImage != "alpine:latest" {
 		t.Errorf("Expected helper image 'alpine:latest', got '%s'", helperImage)
 	}
@@ -734,8 +739,8 @@ func TestClient_GetDataVolumeConfig_NilAppConfig(t *testing.T) {
 		timeout:   30 * time.Second,
 		appConfig: nil,
 	}
-	storageSize, allowInsecureTLS, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := client.getDataVolumeConfig()
-	if storageSize != "10Gi" || allowInsecureTLS || storageClass != "" || vmUpdateTimeout != "30s" || isoDownloadTimeout != "30m" || helperImage != "alpine:latest" {
+	storageSize, allowInsecureTLS, certConfigMap, storageClass, vmUpdateTimeout, isoDownloadTimeout, helperImage := client.getDataVolumeConfig()
+	if storageSize != "10Gi" || allowInsecureTLS || certConfigMap != "" || storageClass != "" || vmUpdateTimeout != "30s" || isoDownloadTimeout != "30m" || helperImage != "alpine:latest" {
 		t.Error("Expected default values with nil appConfig")
 	}
 }
@@ -3780,11 +3785,11 @@ func setupInsertVirtualMediaTestWithStorageClass(t *testing.T, allowInsecureTLS 
 	mockConfig := &MockConfig{}
 	mockConfig.dataVolumeConfig.storageSize = "10Gi"
 	mockConfig.dataVolumeConfig.allowInsecureTLS = allowInsecureTLS
+	mockConfig.dataVolumeConfig.certConfigMap = ""
 	mockConfig.dataVolumeConfig.storageClass = storageClass
 	mockConfig.dataVolumeConfig.vmUpdateTimeout = "30s"
 	mockConfig.dataVolumeConfig.isoDownloadTimeout = "30m"
 	mockConfig.dataVolumeConfig.helperImage = "alpine:latest"
-
 	if sp != nil {
 		if err := mockDynamicClient.AddStorageProfile(sp); err != nil {
 			t.Fatalf("Failed to add StorageProfile: %v", err)
@@ -5102,5 +5107,88 @@ func TestEjectVirtualMedia_KillsHelperPodAndClearsLabel(t *testing.T) {
 	// The URL annotation should also be removed
 	if url, found := updated.GetAnnotations()[VirtualMediaURLAnnotationPrefix+"cdrom0"]; found {
 		t.Errorf("URL annotation should have been removed, but found %q", url)
+	}
+}
+
+func TestInsertVirtualMediaAsync_BlockUsesCDI_WithCertConfigMap(t *testing.T) {
+	block := corev1.PersistentVolumeBlock
+	sp := &cdiv1beta1.StorageProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "block-storage"},
+		Status: cdiv1beta1.StorageProfileStatus{
+			ClaimPropertySets: []cdiv1beta1.ClaimPropertySet{
+				{VolumeMode: &block},
+			},
+		},
+	}
+
+	fakeK8sClient := fake.NewSimpleClientset()
+	mockDynamicClient := NewMockDynamicClient()
+
+	mockConfig := &MockConfig{}
+	mockConfig.dataVolumeConfig.storageSize = "10Gi"
+	mockConfig.dataVolumeConfig.allowInsecureTLS = false
+	mockConfig.dataVolumeConfig.certConfigMap = "custom-ca-bundle"
+	mockConfig.dataVolumeConfig.storageClass = "block-storage"
+	mockConfig.dataVolumeConfig.vmUpdateTimeout = "30s"
+	mockConfig.dataVolumeConfig.isoDownloadTimeout = "30m"
+	mockConfig.dataVolumeConfig.helperImage = "alpine:latest"
+
+	if err := mockDynamicClient.AddStorageProfile(sp); err != nil {
+		t.Fatalf("Failed to add StorageProfile: %v", err)
+	}
+
+	vm := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vm",
+			Namespace: "test-ns",
+		},
+		Spec: kubevirtv1.VirtualMachineSpec{
+			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
+				Spec: kubevirtv1.VirtualMachineInstanceSpec{
+					Domain: kubevirtv1.DomainSpec{
+						Devices: kubevirtv1.Devices{},
+					},
+				},
+			},
+		},
+	}
+	if err := mockDynamicClient.AddVM(vm); err != nil {
+		t.Fatalf("Failed to add VM: %v", err)
+	}
+
+	client := NewClientWithClients(fakeK8sClient, mockDynamicClient, 30*time.Second, mockConfig)
+
+	err := client.insertVirtualMediaAsync("test-ns", "test-vm", "cdrom0", "https://custom-ca.example.com/image.iso")
+	if err != nil {
+		t.Fatalf("insertVirtualMediaAsync failed: %v", err)
+	}
+
+	// Verify VolumeImportSource was created with CertConfigMap
+	pvcList, err := fakeK8sClient.CoreV1().PersistentVolumeClaims("test-ns").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("Failed to list PVCs: %v", err)
+	}
+	if len(pvcList.Items) < 1 {
+		t.Fatal("Expected at least one PVC")
+	}
+
+	pvc := pvcList.Items[0]
+	if pvc.Spec.DataSourceRef == nil {
+		t.Fatal("Expected PVC DataSourceRef to be set")
+	}
+	visName := pvc.Spec.DataSourceRef.Name
+
+	gvrVIS := schema.GroupVersionResource{Group: "cdi.kubevirt.io", Version: "v1beta1", Resource: "volumeimportsources"}
+	visObj, err := mockDynamicClient.Resource(gvrVIS).Namespace("test-ns").Get(context.Background(), visName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get VolumeImportSource %s: %v", visName, err)
+	}
+
+	certConfigMap, found, err := unstructured.NestedString(visObj.Object, "spec", "source", "http", "certConfigMap")
+	if err != nil || !found {
+		t.Fatalf("Expected certConfigMap in VolumeImportSource spec: found=%v, err=%v", found, err)
+	}
+	if certConfigMap != "custom-ca-bundle" {
+		t.Errorf("Expected certConfigMap 'custom-ca-bundle', got '%s'", certConfigMap)
 	}
 }
