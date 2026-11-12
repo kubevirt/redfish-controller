@@ -1672,12 +1672,6 @@ func (c *Client) CheckInsertedMedia(namespace, name, mediaID, imageURL string) (
 		return MediaStateNone, fmt.Errorf("failed to get VM %s/%s: %w", namespace, name, err)
 	}
 
-	// After a failed import the attached PVC holds no image; a new insert
-	// replaces it, so there is nothing to compare the request against.
-	if vm.GetAnnotations()[ImportFailedAnnotationPrefix+mediaID] != "" {
-		return MediaStateNone, nil
-	}
-
 	// Check if the device has a PVC volume attached
 	hasPVC := false
 	if vm.Spec.Template != nil {
@@ -1693,6 +1687,14 @@ func (c *Client) CheckInsertedMedia(namespace, name, mediaID, imageURL string) (
 	// does not queue a second job.
 	importing := vm.GetLabels()[ImportingLabelPrefix+mediaID] != ""
 	if !hasPVC && !importing {
+		return MediaStateNone, nil
+	}
+
+	// After a failed import the attached PVC holds no image; a new insert
+	// replaces it, so there is nothing to compare the request against. Once
+	// that new insert is accepted the importing label is back, and the marker
+	// only waits for the job to clear it.
+	if !importing && vm.GetAnnotations()[ImportFailedAnnotationPrefix+mediaID] != "" {
 		return MediaStateNone, nil
 	}
 

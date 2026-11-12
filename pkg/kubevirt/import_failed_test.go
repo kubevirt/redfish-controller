@@ -242,6 +242,36 @@ func TestCheckInsertedMedia_FailedImportIsNotInserted(t *testing.T) {
 	}
 }
 
+// A re-insert after a failure is accepted before its job replaces the PVC, so
+// for a moment the VM carries both the marker and the new pending import. The
+// pending import is what a further request must be compared against.
+func TestCheckInsertedMedia_PendingReinsertAfterFailedImport(t *testing.T) {
+	cases := map[string]MediaState{
+		"http://example.com/boot.iso":  MediaStateImporting,
+		"http://example.com/other.iso": MediaStateConflict,
+	}
+	for url, want := range cases {
+		t.Run(url, func(t *testing.T) {
+			mockDynamic := NewMockDynamicClient()
+			mockDynamic.AddVM(withCDROMVolume(newTestVM("test-ns", "test-vm",
+				map[string]string{ImportingLabelPrefix + "cdrom0": importPendingValue(time.Now())},
+				map[string]string{
+					failedTestURLAn:  "http://example.com/boot.iso",
+					failedTestMarker: failedTestPod,
+				}), "test-vm-bootiso"))
+			client := NewClientWithClients(fake.NewSimpleClientset(), mockDynamic, 30*time.Second, nil)
+
+			state, err := client.CheckInsertedMedia("test-ns", "test-vm", "cdrom0", url)
+			if err != nil {
+				t.Fatalf("CheckInsertedMedia failed: %v", err)
+			}
+			if state != want {
+				t.Errorf("state = %d, want %d", state, want)
+			}
+		})
+	}
+}
+
 func TestInsertVirtualMedia_ClearsFailedImportMarker(t *testing.T) {
 	client, mockDynamic, _ := setupInsertVirtualMediaTest(t, false)
 	vm, _ := mockDynamic.GetVM("test-ns", "test-vm")
