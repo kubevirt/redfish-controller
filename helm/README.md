@@ -2,13 +2,6 @@
 
 This Helm chart deploys the KubeVirt Redfish API server, which provides a Redfish-compliant REST API for managing KubeVirt virtual machines. The server enables integration with tools like Metal3/Ironic for bare metal provisioning workflows and Zero Touch Provisioning (ZTP) automation.
 
-## Chart Version
-
-- **Chart Version**: 0.2.1-73abb30
-- **App Version**: v0.2.1
-- **Kubernetes**: 1.25+
-- **Helm**: 3.0+
-
 ## Prerequisites
 
 - Kubernetes 1.25+ or OpenShift 4.18+
@@ -18,27 +11,27 @@ This Helm chart deploys the KubeVirt Redfish API server, which provides a Redfis
 
 ## Quick Start
 
-### Option 1: OCI Registry Deployment (Recommended)
+### Install from Source
+
+The previously documented public chart endpoints, `https://kubevirt.github.io/charts` and `oci://quay.io/kubevirt/charts/redfish-controller`, are unavailable; see [issue #21](https://github.com/kubevirt/redfish-controller/issues/21). Use the chart in this repository instead.
+
+Clone the repository with Git and run the following commands from its root:
 
 ```bash
-# Show available values
-helm show values oci://quay.io/kubevirt/charts/redfish-controller --version 0.2.1
-
-# Install with default values
-helm install kubevirt-redfish oci://quay.io/kubevirt/charts/redfish-controller \
-  --version 0.2.1 \
-  --namespace kubevirt-redfish \
-  --create-namespace
-
-# Install with custom values
-helm install kubevirt-redfish oci://quay.io/kubevirt/charts/redfish-controller \
-  --version 0.2.1 \
-  --namespace kubevirt-redfish \
-  --create-namespace \
-  -f my-values.yaml
+git clone https://github.com/kubevirt/redfish-controller.git
+cd redfish-controller
 ```
 
-### Option 2: Local Chart Deployment
+The chart comes from your source checkout, rather than a published chart release. Optionally select a specific revision with `git checkout <revision>`. Inspect its metadata with `helm show chart ./helm`.
+
+Review and save the values before installing:
+
+```bash
+helm show values ./helm
+helm show values ./helm > my-values.yaml
+```
+
+Edit `my-values.yaml` for your environment, including authentication, chassis namespaces, and the OpenShift route. Set `global.namespace` to your installation namespace. Choose an available `global.image.tag` from the [container repository](https://quay.io/repository/kubevirt/redfish-controller?tab=tags); changing the source revision does not select a matching container image automatically.
 
 ```bash
 # Install with default values
@@ -90,7 +83,7 @@ helm install kubevirt-redfish ./helm \
 | Parameter | Description | Default | Example |
 |-----------|-------------|---------|---------|
 | `global.namespace` | Deployment namespace | `"kubevirt-redfish"` | `"my-namespace"` |
-| `global.image.tag` | Container image tag | `"v0.2.1"` | `"v0.2.1"` |
+| `global.image.tag` | Container image tag | `"latest"` | An available tag from the container repository |
 | `deployment.replicas` | Number of replicas | `1` | `1` |
 | `route.host` | OpenShift route hostname | `"kubevirt-redfish-default.apps.clustername.example.com"` | `"kubevirt-redfish-default.apps.clustername.example.com"` |
 | `datavolume.storage_class` | Storage class for ISOs | `""` (default) | `"lvms-vg1"` |
@@ -418,21 +411,16 @@ kubectl logs deployment/kubevirt-redfish -n your-namespace | grep -E "(virtual m
 
 ## Upgrading
 
+Update your source checkout to the desired Git revision before upgrading, then run Helm from the repository root. Review changes to `helm/values.yaml` and update your custom values as needed, including `global.image.tag` for the container version you want to deploy.
+
 ```bash
-# Upgrade with OCI registry
-helm upgrade kubevirt-redfish oci://quay.io/kubevirt/charts/redfish-controller \
-  --version 0.2.1 \
-  --namespace kubevirt-redfish
-
-# Upgrade with local chart
-helm upgrade kubevirt-redfish ./helm \
-  --namespace kubevirt-redfish
-
-# Upgrade with custom values
+# Upgrade with your custom values
 helm upgrade kubevirt-redfish ./helm \
   -f my-values.yaml \
   --namespace kubevirt-redfish
 ```
+
+Use the same release name and namespace as your existing installation. If you installed with example values or another values file, pass that file instead.
 
 ## Troubleshooting
 
