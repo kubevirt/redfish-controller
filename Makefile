@@ -150,6 +150,8 @@ test:
 test-coverage:
 	@echo "Running tests with coverage..."
 	go test -v -coverprofile=coverage.out ./...
+	@echo "Coverage summary:"
+	go tool cover -func=coverage.out
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 
@@ -169,6 +171,16 @@ fmt:
 	@echo "Formatting code..."
 	go fmt ./...
 
+.PHONY: fmt-check
+fmt-check:
+	@echo "Checking code formatting..."
+	@unformatted="$$(gofmt -l $$(git ls-files '*.go'))"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "Code is not properly formatted. Run 'make fmt' to fix."; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+
 .PHONY: vet
 vet:
 	@echo "Running go vet..."
@@ -177,13 +189,24 @@ vet:
 .PHONY: lint
 lint:
 	@echo "Running golangci-lint..."
-	golangci-lint run
+	golangci-lint run --timeout=5m
 
 .PHONY: tidy
 tidy:
 	@echo "Tidying go modules..."
 	go mod tidy
 	go mod verify
+
+.PHONY: tidy-check
+tidy-check:
+	@echo "Checking Go module tidiness..."
+	go mod tidy
+	go mod verify
+	@if [ -n "$$(git status --porcelain go.mod go.sum)" ]; then \
+		echo "Go modules are not tidy. Run 'make tidy' to fix."; \
+		git diff go.mod go.sum; \
+		exit 1; \
+	fi
 
 # Validation targets
 .PHONY: validate
@@ -217,12 +240,20 @@ test-local-standalone: build-local
 	@echo "Starting kubevirt-redfish in standalone mode..."
 	./kubevirt-redfish --config config-standalone.yaml
 
+.PHONY: smoke-test
+smoke-test: build-local
+	@echo "Running local smoke tests..."
+	./kubevirt-redfish --help || echo "Help command completed"
+	./kubevirt-redfish --create-config test-config.yaml
+	@test -f test-config.yaml
+	@rm -f test-config.yaml
+
 # Integration testing
 .PHONY: test-integration
 test-integration: build
 	@echo "Running integration tests..."
 	@echo "Note: This requires a running Kubernetes cluster with KubeVirt"
-	./scripts/test-integration.sh
+	./hack/test-integration.sh
 
 # OpenShift deployment targets
 .PHONY: deploy-openshift
@@ -303,6 +334,7 @@ clean:
 	rm -f kubevirt-redfish-arm64
 	rm -f coverage.out
 	rm -f coverage.html
+	rm -f test-config.yaml
 	rm -f $(HELM_CHART_NAME)-*.tgz
 	rm -f helm/Chart.yaml.bak
 
@@ -353,14 +385,17 @@ help:
 	@echo "  test-race          - Run tests with race detection"
 	@echo "  test-short         - Run short tests only"
 	@echo "  test-local         - Test locally with built binary"
+	@echo "  smoke-test         - Run local binary smoke checks"
 	@echo "  test-integration   - Run integration tests"
 	@echo "  test-api           - Test the API locally"
 	@echo ""
 	@echo "Code Quality:"
 	@echo "  fmt                - Format code"
+	@echo "  fmt-check          - Verify formatting without leaving changes"
 	@echo "  vet                - Run go vet"
 	@echo "  lint               - Run golangci-lint"
 	@echo "  tidy               - Tidy go modules"
+	@echo "  tidy-check         - Verify go.mod and go.sum are tidy"
 	@echo "  validate           - Run all validation checks"
 	@echo ""
 	@echo "Development:"

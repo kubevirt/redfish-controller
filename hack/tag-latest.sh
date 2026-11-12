@@ -2,7 +2,7 @@
 set -e
 
 # Script to tag an existing image with 'latest'
-# Usage: ./scripts/tag-latest.sh <commit-sha>
+# Usage: ./hack/tag-latest.sh <commit-sha>
 #
 # Environment variables:
 #   REGISTRY: Container registry (default: quay.io)
