@@ -192,6 +192,7 @@ func (w *Worker) Stop() {
 
 // work is the main work loop for a worker
 func (w *Worker) work() {
+	defer w.wg.Done()
 	logger.Debug("Worker %d starting work loop", w.ID)
 	for {
 		select {
