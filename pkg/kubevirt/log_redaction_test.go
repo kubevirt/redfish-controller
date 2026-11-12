@@ -24,8 +24,9 @@ func captureLog(t *testing.T) *bytes.Buffer {
 }
 
 const (
-	redactedISOURL = "http://example.com/images/abc/full.iso"
-	secretISOURL   = redactedISOURL + "?api_key=SECRET-TOKEN"
+	plainISOURL    = "http://example.com/images/abc/full.iso"
+	secretISOURL   = plainISOURL + "?api_key=SECRET-TOKEN"
+	redactedISOURL = plainISOURL + "?<redacted>"
 )
 
 func TestInsertVirtualMedia_DoesNotLogTheImageToken(t *testing.T) {

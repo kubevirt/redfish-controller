@@ -8,9 +8,11 @@ func TestRedactURL(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"query string dropped", "https://images.example.com/images/abc/full.iso?api_key=SECRET&arch=x86_64", "https://images.example.com/images/abc/full.iso"},
-		{"userinfo dropped", "https://user:SECRET@host.example.com/boot.iso", "https://host.example.com/boot.iso"},
-		{"fragment dropped", "http://host/boot.iso#SECRET", "http://host/boot.iso"},
+		{"query string marked", "https://images.example.com/images/abc/full.iso?api_key=SECRET&arch=x86_64", "https://images.example.com/images/abc/full.iso?<redacted>"},
+		{"username and password marked", "https://user:SECRET@host.example.com/boot.iso", "https://<redacted>@host.example.com/boot.iso"},
+		{"username alone marked", "https://SECRET@host.example.com/boot.iso", "https://<redacted>@host.example.com/boot.iso"},
+		{"fragment marked", "http://host/boot.iso#SECRET", "http://host/boot.iso#<redacted>"},
+		{"every removed piece marked", "https://user:SECRET@host:8443/boot.iso?token=SECRET#SECRET", "https://<redacted>@host:8443/boot.iso?<redacted>#<redacted>"},
 		{"port kept", "http://slow-iso.ns.svc:8080/alpine.iso", "http://slow-iso.ns.svc:8080/alpine.iso"},
 		{"plain url unchanged", "http://example.com/image.iso", "http://example.com/image.iso"},
 		{"unparsable", "://not-a-url?token=SECRET", "<unparsable url>"},
