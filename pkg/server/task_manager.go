@@ -280,6 +280,7 @@ func (w *Worker) processJob(job *Job) {
 			if taskErr := w.taskMgr.FailTask(job.TaskID, fmt.Sprintf("Job failed after %d retries: %v", job.MaxRetries, err)); taskErr != nil {
 				logger.Error("Failed to mark task %s as failed: %v", job.TaskID, taskErr)
 			}
+			w.clearPendingImport(job)
 		}
 	} else {
 		logger.Info("Worker %d completed job %s successfully in %v", w.ID, job.ID, duration)
@@ -287,6 +288,22 @@ func (w *Worker) processJob(job *Job) {
 		if taskErr := w.taskMgr.CompleteTask(job.TaskID, "Job completed successfully"); taskErr != nil {
 			logger.Error("Failed to mark task %s as completed: %v", job.TaskID, taskErr)
 		}
+	}
+}
+
+// clearPendingImport drops the placeholder the InsertMedia handler put on the
+// VM when the insert job gives up before creating an import pod; the pod
+// watcher owns the label from that point on and the placeholder is gone anyway.
+func (w *Worker) clearPendingImport(job *Job) {
+	if job.Type != TaskTypeVirtualMediaInsert || w.taskMgr.kubevirtClient == nil {
+		return
+	}
+	payload, ok := job.Payload.(map[string]string)
+	if !ok {
+		return
+	}
+	if err := w.taskMgr.kubevirtClient.ClearPendingImport(payload["namespace"], payload["vmName"], payload["mediaID"]); err != nil {
+		logger.Error("Failed to clear pending import for VM %s/%s after job %s failed: %v", payload["namespace"], payload["vmName"], job.ID, err)
 	}
 }
 
