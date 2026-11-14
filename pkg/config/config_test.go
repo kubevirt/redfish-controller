@@ -181,13 +181,15 @@ func TestKubeClientRateLimits(t *testing.T) {
 		}
 	})
 
-	t.Run("zero means default", func(t *testing.T) {
+	// Zero is passed through untouched: the kubevirt client treats it as
+	// "not set" and applies client-go's defaults.
+	t.Run("zero is accepted", func(t *testing.T) {
 		config, err := LoadConfig(writeConfig(t, minimalConfig("  qps: 0\n  burst: 0\n")))
 		if err != nil {
 			t.Fatalf("Failed to load config: %v", err)
 		}
-		if qps, burst := config.GetKubeClientRateLimits(); qps != DefaultKubeClientQPS || burst != DefaultKubeClientBurst {
-			t.Errorf("Expected defaults for zero values, got qps=%v burst=%d", qps, burst)
+		if qps, burst := config.GetKubeClientRateLimits(); qps != 0 || burst != 0 {
+			t.Errorf("Expected zero values to be left as they are, got qps=%v burst=%d", qps, burst)
 		}
 	})
 }

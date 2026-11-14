@@ -267,10 +267,12 @@ kubevirt:
   # client-go's defaults of 5 / 10. Each Redfish request fans out to several
   # API calls (a GET System is 6, a boot-device PATCH is 12), so with N BMHs
   # in flight the worst request takes roughly 12 * N / qps seconds; the
-  # defaults saturate at ~15 BMHs. Watch the pod log for "Waited for ... due
-  # to client-side throttling"; if it appears under load, raise these
-  # (e.g. qps: 100, burst: 200). The env vars KUBEVIRT_REDFISH_KUBEVIRT_QPS /
+  # defaults saturate at ~15 BMHs. Grep the pod log for "client-side
+  # throttling"; if it appears under load, raise these (e.g. qps: 100,
+  # burst: 200). The env vars KUBEVIRT_REDFISH_KUBEVIRT_QPS /
   # KUBEVIRT_REDFISH_KUBEVIRT_BURST (deployment.container.env) override both.
+  # The client is built once at startup: unlike the hot-reloaded parts of the
+  # config, a change here only takes effect after the pod restarts.
   qps: 0
   burst: 0
 

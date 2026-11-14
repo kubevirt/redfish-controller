@@ -43,6 +43,7 @@ func TestKubeClientRateLimits(t *testing.T) {
 		{"config without rate limits keeps client-go defaults", struct{}{}, rest.DefaultQPS, rest.DefaultBurst},
 		{"configured values are used", fakeRateLimitConfig{qps: 100, burst: 200}, 100, 200},
 		{"zero falls back per field", fakeRateLimitConfig{qps: 50, burst: 0}, 50, rest.DefaultBurst},
+		{"all zero keeps client-go defaults", fakeRateLimitConfig{}, rest.DefaultQPS, rest.DefaultBurst},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

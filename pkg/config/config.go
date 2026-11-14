@@ -200,14 +200,6 @@ func passwordDecodeHook(from reflect.Type, to reflect.Type, data interface{}) (i
 	}
 }
 
-// Rate limits applied when kubevirt.qps / kubevirt.burst are left unset (zero).
-// They are client-go's own defaults, so behaviour is unchanged unless an
-// operator raises them for a large deployment.
-const (
-	DefaultKubeClientQPS   float32 = rest.DefaultQPS
-	DefaultKubeClientBurst int     = rest.DefaultBurst
-)
-
 // KubeVirtConfig holds KubeVirt-specific configuration parameters.
 // It includes API version settings, timeout configurations, and TLS settings for KubeVirt operations.
 type KubeVirtConfig struct {
@@ -215,9 +207,9 @@ type KubeVirtConfig struct {
 	Timeout          int    `mapstructure:"timeout"`
 	AllowInsecureTLS bool   `mapstructure:"allow_insecure_tls"`
 	// QPS and Burst set the client-go rate limiter for calls to the Kubernetes
-	// API. They default to client-go's 5 / 10. Every Redfish request fans out
-	// to several API calls, so with many BMHs polling at once those defaults
-	// queue requests for tens of seconds; raise them for such deployments.
+	// API; zero keeps client-go's defaults. See helm/values.yaml for sizing.
+	// The client is built once at startup, so unlike the hot-reloaded parts of
+	// the config a change here only takes effect after a restart.
 	QPS   float32 `mapstructure:"qps"`
 	Burst int     `mapstructure:"burst"`
 }
@@ -335,8 +327,8 @@ func setDefaults() {
 	viper.SetDefault("kubevirt.api_version", "v1")
 	viper.SetDefault("kubevirt.timeout", 30)
 	viper.SetDefault("kubevirt.allow_insecure_tls", false)
-	viper.SetDefault("kubevirt.qps", DefaultKubeClientQPS)
-	viper.SetDefault("kubevirt.burst", DefaultKubeClientBurst)
+	viper.SetDefault("kubevirt.qps", rest.DefaultQPS)
+	viper.SetDefault("kubevirt.burst", rest.DefaultBurst)
 	viper.SetDefault("datavolume.storage_size", "10Gi")
 	viper.SetDefault("datavolume.allow_insecure_tls", false)
 	viper.SetDefault("datavolume.vm_update_timeout", "30s")
@@ -532,13 +524,6 @@ func validateKubeVirtConfig(kv *KubeVirtConfig) error {
 		return errors.NewValidationError("Invalid KubeVirt timeout", fmt.Sprintf("kubevirt.timeout must be between 1 and 300 seconds, got %d", kv.Timeout))
 	}
 
-	// Zero means "not set" (client-go's own convention): apply the defaults.
-	if kv.QPS == 0 {
-		kv.QPS = DefaultKubeClientQPS
-	}
-	if kv.Burst == 0 {
-		kv.Burst = DefaultKubeClientBurst
-	}
 	if kv.QPS < 0 {
 		return errors.NewValidationError("Invalid KubeVirt QPS", fmt.Sprintf("kubevirt.qps must be greater than 0, got %v", kv.QPS))
 	}

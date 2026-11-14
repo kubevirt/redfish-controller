@@ -205,12 +205,9 @@ func volumeImportSourceToUnstructured(vis *cdiv1beta1.VolumeImportSource) (*unst
 }
 
 // kubeClientRateLimits returns the client-go QPS and burst for the Kubernetes
-// API client. They come from kubevirt.qps / kubevirt.burst in the app config
-// (or KUBEVIRT_REDFISH_KUBEVIRT_QPS / _BURST). Without a config, or for a
-// value left at zero, client-go's own defaults apply. Large deployments need
-// higher values: every Redfish request fans out to several API calls, and with
-// many BMHs polling at once the default limiter queues requests long enough
-// for the OpenShift route to time out.
+// API client, taken from kubevirt.qps / kubevirt.burst in the app config.
+// Without a config, or for a value left at zero, client-go's own defaults
+// apply.
 func kubeClientRateLimits(appConfig interface{}) (float32, int) {
 	qps, burst := rest.DefaultQPS, rest.DefaultBurst
 	if rl, ok := appConfig.(interface {
