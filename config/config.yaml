@@ -2,6 +2,8 @@
 kubevirt:
   api_version: "v1"                                 # Kubevirt API version (v1 is default (typically unchanged unless testing)
   timeout: 30                                       # Timeout for Kubevirt API calls (30 seconds is default (typically unchanged unless testing)
+  qps: 5                                            # client-go rate limit for Kubernetes API calls, sustained requests/second (5, the client-go default, is default; env KUBEVIRT_REDFISH_KUBEVIRT_QPS)
+  burst: 10                                         # client-go rate limit burst, max requests above qps in a spike (10, the client-go default, is default; env KUBEVIRT_REDFISH_KUBEVIRT_BURST)
 
 server:
   host: "0.0.0.0"                                   # Host for the Redfish server (0.0.0.0 is default (typically unchanged unless testing)
