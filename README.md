@@ -11,7 +11,6 @@
 [![Coverage](https://codecov.io/gh/kubevirt/redfish-controller/branch/main/graph/badge.svg)](https://codecov.io/gh/kubevirt/redfish-controller)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Container](https://img.shields.io/badge/container-quay.io-red.svg)](https://quay.io/repository/kubevirt/redfish-controller)
-[![Helm](https://img.shields.io/badge/helm-oci-blue.svg)](https://quay.io/repository/kubevirt/charts/redfish-controller)
 [![Platform](https://img.shields.io/badge/platform-OpenShift-red.svg)](https://docs.openshift.com/container-platform/latest/virt/about-virt.html)
 
 A Redfish-compatible API server for KubeVirt/OpenShift Virtualization that enables out-of-band management of virtual machines through standard Redfish protocols.
@@ -65,69 +64,47 @@ KubeVirt Redfish bridges the gap between traditional virtualization management t
 
 ## Installation QuickStart (via Helm)
 
-The `kubevirt-redfish` project uses [Quay.io](https://quay.io/) to store both the [container](https://quay.io/repository/kubevirt/redfish-controller?tab=tags) and [Helm](https://quay.io/repository/kubevirt/charts/kubevirt-redfish?tab=tags) chart artifacts. Previous instructions were to written to support a direct OCI installation (i.e. `helm pull oci://quay.io/kubevirt/charts/redfish-controller --version 0.2.1`), however I would suggest you follow the instructions below to install `kubevirt-redfish`. Reserve any direct OCI chart testing for development purposes only. There is also an [operator](https://github.com/kubevirt/redfish-controller-operator) that can be leveraged as well, but please wait until release v0.3.0 for these projects to work seamlessly. For now, follow the instructions below for the most recent installation proceedures.
+Install the `kubevirt-redfish` chart included in this repository. The previously documented public chart endpoints, `https://kubevirt.github.io/charts` and `oci://quay.io/kubevirt/charts/redfish-controller`, are unavailable; see [issue #21](https://github.com/kubevirt/redfish-controller/issues/21).
 
-(*Updated: 25/08/25 at 11:35UTC)
-
-1. Add the Helm repository for the most recent Chart for this project (`kubevirt-redfish`).
+1. Clone the source and enter the repository root. Git is required for this step.
 
    ```bash
-   helm repo add kubevirt https://kubevirt.github.io/charts
-   helm repo update
+   git clone https://github.com/kubevirt/redfish-controller.git
+   cd redfish-controller
    ```
 
-   You should then see the Helm chart when performing a `helm list`.
+   This installs the chart from your source checkout, rather than a published chart release. To use a specific Git revision, run `git checkout <revision>` before continuing. Run all chart commands below from the repository root.
+
+2. Review and save the chart values for editing.
 
    ```bash
-   ❯ helm search repo kubevirt
-   NAME                         CHART VERSION   APP VERSION     DESCRIPTION
-   kubevirt/redfish-controller     0.2.3           v0.2.3-f87ff92  Custom kubevirt-redfish chart with enhanced fea...
-   kubevirt/vms-on-ocpv          0.1.1           v0.1.1-ff18cb3  A Helm chart that deploys Virtual Machines on O...
+   helm show values ./helm
+   helm show values ./helm > my-values.yaml
    ```
 
-2. You can then review the example `values.yaml` included with the Helm chart by using the following command.
-   ```bash
-   helm show values kubevirt/redfish-controller --version 0.2.3
-   ```
+   Edit `my-values.yaml` for your environment, including authentication, chassis namespaces, and the OpenShift route. Set `global.namespace` to the installation namespace if you change it. Choose an available container image tag in `global.image.tag` from the [container repository](https://quay.io/repository/kubevirt/redfish-controller?tab=tags); selecting a Git revision does not change the image tag automatically.
 
-   NOTE: If you prefer to have a cleaned version of the `values.yaml` (i.e. without comments or line breaks) you can run the following.
-   ```bash
-   helm show values kubevirt/redfish-controller --version 0.2.3 | sed 's/\s*#.*$//' | grep -v '^\s*$'
-   ```
+3. Install the chart with your custom values.
 
-3. To save the `values.yaml` to your your local environment for direct editing, just redirect the output to a YAML file.
    ```bash
-   helm show values kubevirt/redfish-controller --version 0.2.3 > my-values.yaml
-   ```
-
-4. You can also save the chart locally by issuing the following command.
-   ```bash
-   # Download the Chart locally:
-   helm pull kubevirt/redfish-controller --version 0.2.3
-   
-   # Explode the tar file:
-   tar -xzf kubevirt-redfish-0.2.3.tgz
-
-   # Make a copy of the sample values.yaml manifest:
-   cp kubevirt-redfish/values.yaml my-values.yaml
-   ```
-
-5. Now you can install the Chart using your own custom values.yaml:
-   ```bash
-   helm install kubevirt-redfish kubevirt/redfish-controller --version 0.2.3 \
+   helm install kubevirt-redfish ./helm \
      --namespace kubevirt-redfish \
      --create-namespace \
      -f my-values.yaml
    ```
 
-6. You can also ***optionally*** use inline edits during the `helm install` command.
+   You can also override values inline. Replace `<image-tag>` with your chosen container image tag:
+
    ```bash
-   helm install kubevirt-redfish kubevirt/redfish-controller \
-     --set image.tag=v0.2.3 \
-     --set service.type=LoadBalancer \
+   helm install kubevirt-redfish ./helm \
      --namespace kubevirt-redfish \
-     --create-namespace
+     --create-namespace \
+     -f my-values.yaml \
+     --set-string global.image.tag='<image-tag>' \
+     --set service.type=LoadBalancer
    ```
+
+For upgrades, see the [chart upgrade instructions](helm/README.md#upgrading).
 
 ### Verification
 

@@ -26,26 +26,13 @@ This guide is intended to provide an end-to-end demonstration of an OpenShift `C
 
 3. This will open a new web link to [mirror.openshift.com](https://mirror.openshift.com/pub/openshift-v4/clients/helm/latest). You can select your version of Helm, unpack it, and move it to a location as defined in your `$PATH` (typically `/usr/local/bin` works).
 
-### Add the Helm Repository
+### Add the VM Helm Repository
 
-1. Add the following Helm repository using the command below. This Charts repository is hosted via [GitHub pages](http://github.com/v1k0d3n/charts).
+1. Add the following Helm repository for the separate `vms-on-ocpv` example chart used in Step 1. This repository is hosted via [GitHub Pages](https://github.com/v1k0d3n/charts). The controller itself will use the source chart in Step 2.
 
    ```bash
    helm repo add v1k0d3n https://v1k0d3n.github.io/charts
    helm repo update v1k0d3n
-   ```
-
-2. Now you can view the versions of the Helm chart with the following command. Be aware of the `appVersion` tag and commit, which matches tags and commits within this GitHub repository (i.e. `v0.2.3-f87ff92`).
-
-   ```bash
-   helm search repo v1k0d3n/kubevirt-redfish --versions
-   ```
-
-   Example:
-   ```bash
-   ❯ helm search repo v1k0d3n/kubevirt-redfish --versions
-   NAME                    	CHART VERSION	APP VERSION   	DESCRIPTION
-   v1k0d3n/kubevirt-redfish	0.2.3        	v0.2.3-f87ff92	Custom kubevirt-redfish chart with enhanced fea...
    ```
 
 ## Step 1: Install Virtual Machines (via Helm)
@@ -79,18 +66,24 @@ This guide is intended to provide an end-to-end demonstration of an OpenShift `C
 
 ## Step 2: Install kubevirt-redfish (via Helm)
 
-1. Again using the `v1k0d3n` Helm repository, you can deploy the `kubevirt-redfish` using the Helm chart called `v1k0d3n/kubevirt-redfish`. I ***am not** going to recommend downloading a custom `values.yaml` in this case, but instead I recommend you edit/use the [sample values file](./examples/custom-values-kubevirt-redfish.yaml).
+1. Install the controller from this repository's chart, following the [source installation approach](../README.md#installation-quickstart-via-helm). The previously documented public controller chart endpoints are unavailable; see [issue #21](https://github.com/kubevirt/redfish-controller/issues/21).
+
+   Clone the repository with Git and run all commands below from its root. If you already have a checkout, use that directory. Optionally select a specific Git revision with `git checkout <revision>`.
 
    ```bash
-   curl -L -o custom-values-kubevirt-redfish.yaml https://raw.githubusercontent.com/kubevirt/redfish-controller/refs/heads/main/docs/examples/custom-values-kubevirt-redfish.yaml
+   git clone https://github.com/kubevirt/redfish-controller.git
+   cd redfish-controller
+   cp docs/examples/custom-values-kubevirt-redfish.yaml custom-values-kubevirt-redfish.yaml
    ```
 
-   **EXTREMELY IMPORTANT:** *This is a demonstration, so assuming that you're keeping the same namespace names (and all the other settings), than the only field you should have to edit is the `route.host` field (which is configured to be: `kubevirt-redfish-jinkit-kvm.apps.hub.lab.ocp.run`). You can change the `<clustername>.<domainname>` but if you've left all the other settings (as I recommended), then you can leave the other parts of the URL (i.e. `kubevirt-redfish-jinkit-kvm.apps.`).
+   Edit the [sample values file](./examples/custom-values-kubevirt-redfish.yaml) copy for your environment. Choose an available `global.image.tag` from the [container repository](https://quay.io/repository/kubevirt/redfish-controller?tab=tags); the sample's historical image tag may be unavailable. Keep `global.namespace: jinkit-kvm` for this demonstration.
+
+   For this demonstration, set `route.host` to a hostname for your cluster. The example uses `kubevirt-redfish-jinkit-kvm.apps.hub.lab.ocp.run`; replace the cluster domain while keeping the namespace and other values consistent with the demonstration.
 
 2. Once you have *minimally* configure/edit the `custom-values-kubevirt-redfish.yaml` file for your environment, you can install the chart by using the following command.
 
    ```bash
-   helm upgrade --install kubevirt-redfish v1k0d3n/kubevirt-redfish --version 0.2.3 -f custom-values-kubevirt-redfish.yaml -n jinkit-kvm
+   helm upgrade --install kubevirt-redfish ./helm -f custom-values-kubevirt-redfish.yaml -n jinkit-kvm
    ```
 
 ## Step 3: Deploy OpenShift via ClusterInstance
