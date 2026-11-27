@@ -83,9 +83,11 @@ func TestComputerSystem(t *testing.T) {
 			Health: HealthOK,
 		},
 		PowerState: PowerStateOn,
-		Memory: MemorySummary{
-			OdataID:              "/redfish/v1/Systems/test-system/Memory",
+		MemorySummary: MemorySummary{
 			TotalSystemMemoryGiB: 8.0,
+		},
+		Memory: Link{
+			OdataID: "/redfish/v1/Systems/test-system/Memory",
 		},
 		Storage: Link{
 			OdataID: "/redfish/v1/Systems/test-system/Storage",
