@@ -253,10 +253,13 @@ The server supports full Redfish VirtualMedia operations:
 datavolume:
   storage_size: "3Gi"              # Size for ISO storage
   storage_class: "fast-ssd"        # Storage class for DataVolumes
-  allow_insecure_tls: false        # Security for ISO downloads
+  allow_insecure_tls: false        # Security for ISO downloads (allow self-signed certs)
+  cert_config_map: ""              # ConfigMap containing custom CA certificates for TLS verification
   vm_update_timeout: "2m"          # VM update timeout
   iso_download_timeout: "30m"      # ISO download timeout
 ```
+
+> **Note on `cert_config_map`**: When using endpoints signed by a private or non-standard Certificate Authority, specify the name of a ConfigMap containing the CA bundle via `datavolume.cert_config_map`. This ConfigMap **must already exist in the target VirtualMachine's namespace**. The Redfish controller does not create, update, or manage the lifecycle of this ConfigMap.
 
 ## Security
 
